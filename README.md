@@ -19,7 +19,7 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 - **pLDDT** (0 to 1): The predictor's own confidence in its output. Higher = the model is more sure the predicted 3D shape is correct.
 - **RMSD** (angstroms, 0 to inf): Distance between the predicted shape and a known experimental target shape. Lower = closer match.
 
-A good sequence has **high confidence** (pLDDT close to 1) and **low deviation** from the target (RMSD close to 0).
+A good sequence has **high confidence** (pLDDT close to 1) and **low deviation** from the target (RMSD close to 0). As a rough guideline, desirable results are **pLDDT > 0.8**, **RMSD < 5.0 A**, which corresponds to **fitness > -4.2** with default weights.
 
 ## Setup
 
@@ -34,12 +34,14 @@ uv sync --extra cuda   # GPU (for real runs)
 bash download_params.sh
 
 # 3. Prepare the reference target structure
+#    Target: one protofilament (unpaired side) from PDB 5O3L
+#    https://www.rcsb.org/structure/5O3L
 uv run python prepare_reference.py
 ```
 
 After setup, you should have:
 - `params/` -- AF2 model weights
-- `data/reference_ca_coords.npy` -- target 3D coordinates to match
+- `data/reference_ca_coords.npy` -- target 3D coordinates extracted from one protofilament (unpaired side) of [PDB 5O3L](https://www.rcsb.org/structure/5O3L)
 
 ## Quick Start
 
