@@ -1,6 +1,6 @@
 # PHF Search
 
-Sequence optimization for tau protein filament structures using AlphaFold2 as a black-box evaluator. The current implementation uses Metropolis Monte Carlo, but the codebase is structured so you can **replace the search strategy** (e.g., with a genetic algorithm) without touching the prediction or evaluation layers.
+Sequence optimization for protein structures using AlphaFold2 as a black-box evaluator. The current implementation uses Metropolis Monte Carlo, but the codebase is structured so you can **replace the search strategy** (e.g., with a genetic algorithm) without touching the prediction or evaluation layers.
 
 ## How It Works
 
@@ -10,7 +10,7 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 
 | Aspect | Details |
 |--------|---------|
-| **Search space** | Strings of length 73 over a 20-letter alphabet (amino acids) |
+| **Search space** | Strings of length *L* over a 20-letter alphabet (amino acids) |
 | **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD` |
 | **Evaluation cost** | ~seconds per call on GPU (AlphaFold2 forward pass) |
 
@@ -20,6 +20,17 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 - **RMSD** (angstroms, 0 to inf): Distance between the predicted shape and a known experimental target shape. Lower = closer match.
 
 A good sequence has **high confidence** (pLDDT close to 1) and **low deviation** from the target (RMSD close to 0). As a rough guideline, desirable results are **pLDDT > 0.8**, **RMSD < 5.0 A**, which corresponds to **fitness > -4.2** with default weights.
+
+## Supported Targets
+
+The pipeline works with any PDB structure. Two targets are pre-configured:
+
+| Target | PDB | Chains | Residues | Type | Description |
+|--------|-----|--------|----------|------|-------------|
+| PHF tau | [5O3L](https://www.rcsb.org/structure/5O3L) | A,C,E,G,I | 73 | 5-chain homooligomer | Paired helical filament (default) |
+| WNK2 CCT1 | [6ELM](https://www.rcsb.org/structure/6ELM) | A | 98 | Monomer | WNK2 kinase CCT1 domain |
+
+To add a new target, run `prepare_reference.py` with its PDB ID and chains (see below).
 
 ## Setup
 
@@ -33,32 +44,54 @@ uv sync --extra cuda   # GPU (for real runs)
 # 2. Download AlphaFold2 model parameters (~3.5 GB)
 bash download_params.sh
 
-# 3. Prepare the reference target structure
-#    Target: one protofilament (unpaired side) from PDB 5O3L
-#    https://www.rcsb.org/structure/5O3L
-uv run python prepare_reference.py
+# 3. Prepare reference target structure(s)
+uv run python prepare_reference.py                          # PHF tau (default: 5O3L chains A,C,E,G,I)
+uv run python prepare_reference.py --pdb-id 6ELM --chains A # WNK2 CCT1 monomer
 ```
 
 After setup, you should have:
 - `params/` -- AF2 model weights
-- `data/reference_ca_coords.npy` -- target 3D coordinates extracted from one protofilament (unpaired side) of [PDB 5O3L](https://www.rcsb.org/structure/5O3L)
+- `data/5o3l_acegi_ca_coords.npy` -- PHF target coordinates, shape (5, 73, 3)
+- `data/5o3l_acegi_sequence.txt` -- PHF native sequence (73 residues)
+- `data/6elm_a_ca_coords.npy` -- WNK2 target coordinates, shape (1, 98, 3)
+- `data/6elm_a_sequence.txt` -- WNK2 native sequence (98 residues)
 
 ## Quick Start
 
 ```bash
+# PHF tau 5-chain homooligomer (default)
 uv run python run_search.py --n-steps 100
+
+# WNK2 CCT1 monomer
+uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
+
+# Any other PDB target (after running prepare_reference.py for it)
+uv run python run_search.py --pdb-id <PDB_ID> --chains <CHAIN_IDS> --n-steps 100
 ```
 
-This runs 100 Monte Carlo steps starting from the native tau sequence. Results are saved to `results.json` and predicted structures to `structures/`.
+Results are saved to `results.json` and predicted structures to `structures/`.
 
 ### CLI Options
 
 ```
+Target selection:
+--pdb-id ID          Target PDB ID (default: 5O3L)
+--chains IDS         Comma-separated chain IDs (default: A,C,E,G,I)
+
+Overrides:
+--ref-coords FILE    Reference CA coordinates .npy (auto-derived from --pdb-id/--chains)
+--initial-seq SEQ    Starting sequence (auto-loaded from prepared reference)
+
+Search parameters:
 --n-steps N          Number of optimization steps (default: 1000)
 --temperature T      MC temperature for acceptance (default: 1.0)
 --n-mutations N      Mutations per step (default: 1)
+--num-recycles N     AF2 recycles (default: 3)
 --w-plddt W          Weight for pLDDT in fitness (default: 1.0)
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
+
+Output:
+--log-interval N     Log every N steps (default: 10)
 --save-interval N    Save PDB structure every N steps (default: 1)
 --structures-dir D   Directory for PDB files (default: structures)
 --output FILE        Output JSON path (default: results.json)
@@ -67,15 +100,16 @@ This runs 100 Monte Carlo steps starting from the native tau sequence. Results a
 ## Architecture Overview
 
 ```
-run_search.py          CLI entry point
+run_search.py          CLI entry point (--pdb-id, --chains)
     |
     v
 mc_search.py           Search strategy (THE PART YOU REPLACE)
     |
     v
-predict.py             Black-box evaluator (DO NOT MODIFY)
+predict.py             Black-box evaluator (AF2Predictor, DO NOT MODIFY)
 fitness.py             Objective function
 utils.py               RMSD computation + mutation operator
+prepare_reference.py   Extract reference from any PDB
 ```
 
 The key design: **`predict.py` is an expensive black-box function.** You give it a sequence string, it returns scores and 3D coordinates. Your optimizer's job is to explore the sequence space efficiently.
@@ -100,7 +134,7 @@ To implement a genetic algorithm, you would:
 2. Use `self.predictor.predict(seq)` + `min_permutation_rmsd()` + `compute_fitness()` to evaluate candidates (or just call `_evaluate()`)
 3. Wire it up in `run_search.py`
 
-**Sequence representation:** A sequence is a Python string of length 73 where each character is one of `ACDEFGHIKLMNPQRSTVWY` (the 20 standard amino acids). You can treat this as a categorical optimization problem with 73 positions and 20 choices per position.
+**Sequence representation:** A sequence is a Python string of length *L* where each character is one of `ACDEFGHIKLMNPQRSTVWY` (the 20 standard amino acids). The length *L* is determined by the target structure (e.g., 73 for PHF, 98 for WNK2 CCT1).
 
 ### 2. Change the fitness function -- `fitness.py`
 
@@ -122,15 +156,27 @@ AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"  # 20 letters
 
 ### 4. The evaluator (you probably don't need to touch this) -- `predict.py`
 
-`PHFPredictor.predict(sequence)` wraps AlphaFold2 via ColabDesign. It takes a 73-character string and returns:
+`AF2Predictor.predict(sequence)` wraps AlphaFold2 via ColabDesign. It takes a sequence string and returns:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `plddt` | float (0-1) | Mean prediction confidence |
-| `ca_coords` | ndarray (5, 73, 3) | Predicted 3D coordinates |
+| `ca_coords` | ndarray (copies, length, 3) | Predicted 3D coordinates |
 | `pdb_str` | str | Full atomic structure in PDB format |
 
-Think of this as `f(x) -> score` where `x` is a 73-dimensional categorical variable. Each call takes a few seconds on GPU.
+Think of this as `f(x) -> score` where `x` is an *L*-dimensional categorical variable. Each call takes a few seconds on GPU.
+
+### 5. Add a new target
+
+```bash
+# 1. Prepare reference structure
+uv run python prepare_reference.py --pdb-id <PDB_ID> --chains <CHAIN_IDS>
+
+# 2. Run search
+uv run python run_search.py --pdb-id <PDB_ID> --chains <CHAIN_IDS> --n-steps 100
+```
+
+The pipeline auto-derives sequence length, chain count, and initial sequence from the prepared reference files.
 
 ## Output
 

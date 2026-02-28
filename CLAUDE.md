@@ -1,16 +1,16 @@
 # PHF Search
 
-Monte Carlo sequence optimization for PHF (Paired Helical Filament) tau protein structures using AlphaFold2 via ColabDesign.
+Sequence optimization for protein structures using AlphaFold2 via ColabDesign. Supports monomers and homooligomers from any PDB target.
 
 ## Project Structure
 
 ```
-predict.py           - AF2 prediction wrapper (ColabDesign hallucination protocol, 5-chain homooligomer)
+predict.py           - AF2 prediction wrapper (ColabDesign hallucination protocol, configurable length/copies)
 mc_search.py         - Monte Carlo search engine (mutate -> predict -> evaluate -> accept/reject)
 fitness.py           - Fitness function (w_plddt * pLDDT - w_rmsd * RMSD)
 utils.py             - Kabsch RMSD, chain-permutation RMSD minimization, sequence mutation
-prepare_reference.py - Extract reference CA coordinates from PDB 5O3L
-run_search.py        - CLI entry point
+prepare_reference.py - Extract reference CA coordinates and sequence from any PDB
+run_search.py        - CLI entry point (--pdb-id, --chains for target selection)
 download_params.sh   - AF2 parameter download
 pyproject.toml       - Project definition (managed by uv)
 ```
@@ -19,22 +19,29 @@ pyproject.toml       - Project definition (managed by uv)
 
 ```bash
 bash download_params.sh             # AF2 parameters -> params/
-uv run python prepare_reference.py  # Reference coordinates -> data/reference_ca_coords.npy
+uv run python prepare_reference.py  # Default: 5O3L chains A,C,E,G,I -> data/5o3l_acegi_*
+uv run python prepare_reference.py --pdb-id 6ELM --chains A  # -> data/6elm_a_*
 ```
 
 ## Usage
 
 ```bash
-uv run python run_search.py --n-steps 100 --temperature 1.0
+# PHF tau (default)
+uv run python run_search.py --n-steps 100
+
+# WNK2 CCT1 monomer
+uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 ```
 
 ### CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--pdb-id` | `5O3L` | Target PDB ID |
+| `--chains` | `A,C,E,G,I` | Comma-separated chain IDs |
 | `--data-dir` | `params` | AF2 parameters directory |
-| `--ref-coords` | `data/reference_ca_coords.npy` | Reference CA coordinates |
-| `--initial-seq` | Native sequence (73 residues) | Starting sequence |
+| `--ref-coords` | Auto-derived | Reference CA coordinates (.npy) |
+| `--initial-seq` | Auto-loaded | Starting sequence |
 | `--n-steps` | 1000 | Number of MC steps |
 | `--temperature` | 1.0 | MC temperature |
 | `--n-mutations` | 1 | Mutations per step |
@@ -54,11 +61,12 @@ uv run python run_search.py --n-steps 100 --temperature 1.0
 
 ## Technical Details
 
-- **Prediction**: ColabDesign hallucination protocol, non-multimer (ptm models), copies=5
-- **Structure comparison**: Kabsch RMSD over all 120 chain permutations, taking the minimum
+- **Prediction**: ColabDesign hallucination protocol, non-multimer (ptm models), configurable `copies` (5 for PHF, 1 for monomers)
+- **Structure comparison**: Kabsch RMSD over all n_chains! chain permutations, taking the minimum (trivial for monomers)
 - **Fitness**: `w_plddt * pLDDT - w_rmsd * RMSD` (higher is better)
 - **MC acceptance**: Metropolis criterion `exp(delta_fitness / temperature)`
 - **PDB saving**: `model.save_pdb(filename=None, get_best=False)` returns PDB string (note: `save_current_pdb` has a missing `return` in ColabDesign)
+- **Reference files**: `data/<pdb_id>_<chains>_ca_coords.npy`, `data/<pdb_id>_<chains>_sequence.txt`
 
 ## Development
 
