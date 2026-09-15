@@ -37,6 +37,9 @@ one neighbour instead of two.
 """
 
 import logging
+import json
+import io
+import hashlib
 import os
 
 import numpy as np
@@ -85,10 +88,20 @@ class DDGLookup:
                 "  uv run python precompute_ddg.py --thermompnn-dir <ThermoMPNN checkout>"
             )
 
-        data = np.load(path, allow_pickle=False)
+        # Hash and parse the same bytes, even if the path is later replaced.
+        with open(path, "rb") as handle:
+            artifact_bytes = handle.read()
+        self.artifact = {
+            "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            "provenance": None,
+        }
+        data = np.load(io.BytesIO(artifact_bytes), allow_pickle=False)
+        if "provenance_json" in data:
+            self.artifact["provenance"] = json.loads(str(data["provenance_json"]))
         matrix = data["ddg"]  # (n_chains, n_residues, 20)
         self.reference = str(data["sequence"])
         alphabet = str(data["alphabet"])
+        data.close()
         if alphabet != ALPHABET:
             raise ValueError(
                 f"{path} uses alphabet {alphabet!r}, expected {ALPHABET!r}"

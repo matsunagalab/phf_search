@@ -676,3 +676,15 @@ Two things a new target does not get for free:
 - `structures/step_NNNN.pdb` -- structures at subsequent steps
 
 PDB files can be visualized with [PyMOL](https://pymol.org/), [ChimeraX](https://www.cgl.ucsf.edu/chimerax/), or [Mol*](https://molstar.org/).
+
+### Artifact provenance
+
+New ddG tables contain `provenance_json`: a versioned record of the input PDB
+and checkpoint SHA-256 hashes, ThermoMPNN and generator Git identities (commit
+and dirty status), and generation conditions. Unknown Git information is `null`.
+A dirty status indicates local changes; it does not preserve their contents.
+
+Result JSON includes `ddg_artifact`, identifying the exact table bytes loaded by
+SHA-256 and carrying the table's provenance. Legacy tables remain readable and
+have `provenance: null`; their historical generation inputs are unknown and are
+not inferred from the current environment. With no table, `ddg_artifact` is null.

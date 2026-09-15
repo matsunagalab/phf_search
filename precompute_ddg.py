@@ -23,12 +23,15 @@ pytorch-lightning, wandb, omegaconf and tqdm for what is a forward pass.
 """
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass
 
 import numpy as np
 import torch
+
+from provenance import git_identity, sha256_file
 
 ALPHABET = "ACDEFGHIKLMNPQRSTVWY"
 
@@ -194,6 +197,16 @@ def main():
     device = torch.device(
         "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     )
+    provenance = {
+        "schema_version": 1,
+        "source_pdb_sha256": sha256_file(pdb_path),
+        "checkpoint_sha256": sha256_file(os.path.join(
+            args.thermompnn_dir, "models", "thermoMPNN_default.pt")),
+        "thermompnn": git_identity(args.thermompnn_dir),
+        "generator": git_identity(os.path.dirname(os.path.abspath(__file__))),
+        "conditions": {"pdb_id": args.pdb_id, "chains": chains,
+                       "device": str(device), "model_config": MODEL_CFG},
+    }
     model = load_model(args.thermompnn_dir, device)
     matrix, sequence = site_saturation(model, pdb_path, chains)
 
@@ -207,6 +220,7 @@ def main():
         chains=",".join(chains),
         pdb_id=args.pdb_id,
         source_pdb=os.path.basename(pdb_path),
+        provenance_json=json.dumps(provenance, allow_nan=False),
     )
 
     n_missing = int(np.isnan(matrix).sum())

@@ -504,6 +504,7 @@ def main():
     output = {
         "args": vars(args),
         "initial_seq": initial_seq,
+        "ddg_artifact": ddg_lookup.artifact if ddg_lookup is not None else None,
         # A property of the target, not of a candidate, so it is reported once
         # instead of in every history record.
         "n_native_contacts": shape.native_contact_count(ref_coords),
