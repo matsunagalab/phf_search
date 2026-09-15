@@ -7,12 +7,35 @@ dependencies = [
     "biopython>=1.80",
     "numpy",
     "scipy",
+    # Sequence-level scores (Lobo et al., PNAS 123:e2531932123, 2026).
+    # The logistic-regression heads live in models/esm_heads/ because upstream
+    # ships them outside the Python package; these give the inference code.
+    "fair-esm>=2.0",
+    "amyloid-predict @ git+https://github.com/samlobe/amyloid-predict.git@v1.0.0-manuscript",
+    "llps-predict @ git+https://github.com/samlobe/LLPS-predict.git@v1.0.0-manuscript",
 ]
 
 [project.optional-dependencies]
+# torch travels with jax: one choice picks the matching build of both, so
+# `--extra cpu` does not drag in CUDA wheels that will never be used.
+# torch is capped below 2.9 because later wheels are built against CUDA 13,
+# which needs an r580+ driver; CUDA 12 wheels run on any driver from r525 up.
 cuda = [
     "jax[cuda12]",
+    "torch>=2.4,<2.9",
 ]
 cpu = [
     "jax",
+    "torch>=2.4,<2.9",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", extra = "cpu" }]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]

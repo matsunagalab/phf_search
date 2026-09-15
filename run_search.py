@@ -7,9 +7,6 @@ import os
 
 import numpy as np
 
-from mc_search import MonteCarloSearch
-from predict import AF2Predictor
-
 # Default: PHF tau (5O3L) for backward compatibility
 DEFAULT_PDB_ID = "5O3L"
 DEFAULT_CHAINS = "A,C,E,G,I"
@@ -18,7 +15,7 @@ NATIVE_SEQ = (
 )
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Monte Carlo search for protein sequences matching a target structure"
     )
@@ -68,6 +65,55 @@ def main():
     parser.add_argument(
         "--w-rmsd", type=float, default=1.0, help="RMSD weight in fitness"
     )
+
+    # Sequence-level scores (amyloid-predict / LLPS-predict, Lobo et al. 2026)
+    esm = parser.add_argument_group("ESM2-based sequence scores")
+    esm.add_argument(
+        "--esm-scores",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Compute amyloid/LLPS scores. auto = on when a weight is nonzero "
+        "(default: auto)",
+    )
+    esm.add_argument(
+        "--w-amyloid",
+        type=float,
+        default=0.0,
+        help="Amyloidogenicity weight in fitness; negative penalizes (default: 0.0, report only)",
+    )
+    esm.add_argument(
+        "--w-llps",
+        type=float,
+        default=0.0,
+        help="LLPS propensity weight in fitness; negative penalizes (default: 0.0, report only)",
+    )
+    esm.add_argument(
+        "--amyloid-probe-lengths",
+        default="6,15",
+        help="Sliding-window lengths for the amyloid profile, or 'none' for the "
+        "whole sequence (default: 6,15)",
+    )
+    esm.add_argument(
+        "--amyloid-agg",
+        choices=["mean", "max"],
+        default="mean",
+        help="Which number from the per-residue amyloid profile enters the "
+        "fitness; both are always recorded (default: mean)",
+    )
+    esm.add_argument(
+        "--esm-cpu", action="store_true", help="Run ESM2 on CPU instead of GPU"
+    )
+    esm.add_argument(
+        "--esm-toks-per-batch",
+        type=int,
+        default=4096,
+        help="ESM2 batch size in tokens; lower it on GPU OOM (default: 4096)",
+    )
+    # Remaining knobs (LLPS windowing, the amyloid classifier policy, the
+    # checkpoint directory) are constructor arguments of ESMScorer rather than
+    # flags: their defaults are the ones the published classifiers were trained
+    # for, and changing them is a deliberate, code-level decision.
+
     parser.add_argument(
         "--log-interval", type=int, default=10, help="Log every N steps"
     )
@@ -78,6 +124,45 @@ def main():
         "--structures-dir", default="structures", help="Directory for PDB structures"
     )
     parser.add_argument("--output", default="results.json", help="Output JSON file")
+    return parser
+
+
+def esm_scores_enabled(args) -> bool:
+    if args.esm_scores == "auto":
+        return args.w_amyloid != 0.0 or args.w_llps != 0.0
+    return args.esm_scores == "on"
+
+
+def build_scorer(parser, args):
+    """Construct the ESMScorer, or None when the scores are switched off.
+
+    Called before AF2 is even imported: the constructor checks its settings but
+    loads no weights, so a bad setting fails in a fraction of a second instead
+    of surfacing at the first scored candidate -- a minute later, past AF2's
+    parameter load, one AF2 prediction and the ESM2-3B load.
+    """
+    if not esm_scores_enabled(args):
+        if args.w_amyloid != 0.0 or args.w_llps != 0.0:
+            parser.error(
+                "--esm-scores off leaves the amyloid/LLPS terms uncomputed, but "
+                "--w-amyloid/--w-llps are nonzero."
+            )
+        return None
+
+    from esm_scores import ESMScorer, parse_probe_lengths
+
+    try:
+        return ESMScorer(
+            amyloid_probes=parse_probe_lengths(args.amyloid_probe_lengths),
+            use_gpu=not args.esm_cpu,
+            toks_per_batch=args.esm_toks_per_batch,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        parser.error(f"bad ESM scoring settings: {exc}")
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -85,6 +170,19 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     logger = logging.getLogger(__name__)
+
+    # Built first, while it is still cheap to fail.
+    scorer = build_scorer(parser, args)
+
+    # JAX grabs most of the GPU on import. When ESM2 shares the device it needs
+    # room, so switch preallocation off before AF2 is imported. Set the variable
+    # yourself to override.
+    if scorer is not None and not args.esm_cpu:
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+    from evaluate import SequenceEvaluator
+    from mc_search import MonteCarloSearch
+    from predict import AF2Predictor
 
     # Derive target configuration
     chains = [c.strip() for c in args.chains.split(",")]
@@ -143,17 +241,29 @@ def main():
         copies=n_chains,
     )
 
-    # Run MC search
-    mc = MonteCarloSearch(
+    evaluator = SequenceEvaluator(
         predictor=predictor,
         ref_coords=ref_coords,
+        w_plddt=args.w_plddt,
+        w_rmsd=args.w_rmsd,
+        w_amyloid=args.w_amyloid,
+        w_llps=args.w_llps,
+        scorer=scorer,
+        amyloid_agg=args.amyloid_agg,
+    )
+    logger.info(
+        "Fitness terms: pLDDT, RMSD%s",
+        ", amyloid, LLPS" if scorer is not None else "",
+    )
+
+    # Run MC search
+    mc = MonteCarloSearch(
         initial_seq=initial_seq,
         temperature=args.temperature,
         n_mutations=args.n_mutations,
-        w_plddt=args.w_plddt,
-        w_rmsd=args.w_rmsd,
         save_interval=args.save_interval,
         structures_dir=args.structures_dir,
+        evaluator=evaluator,
     )
 
     logger.info(
@@ -180,8 +290,10 @@ def main():
         "best_fitness": summary["best_fitness"],
         "best_plddt": summary["best_plddt"],
         "best_rmsd": summary["best_rmsd"],
+        "best_metrics": {k: _convert(v) for k, v in summary["best_metrics"].items()},
         "final_seq": summary["final_seq"],
         "final_fitness": summary["final_fitness"],
+        "final_metrics": {k: _convert(v) for k, v in summary["final_metrics"].items()},
         "accept_rate": summary["accept_rate"],
         "history": [
             {k: _convert(v) for k, v in record.items()}
@@ -195,10 +307,12 @@ def main():
     logger.info("Results saved to %s", args.output)
     logger.info("Best sequence: %s", summary["best_seq"])
     logger.info(
-        "Best fitness: %.4f (pLDDT=%.4f, RMSD=%.2f)",
+        "Best fitness: %.4f (%s)",
         summary["best_fitness"],
-        summary["best_plddt"],
-        summary["best_rmsd"],
+        " ".join(
+            f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+            for k, v in summary["best_metrics"].items()
+        ),
     )
 
 
