@@ -286,6 +286,9 @@ Search parameters:
 --temperature T      MC temperature for acceptance (default: 1.0)
 --n-mutations N      Mutations per step (default: 1)
 --num-recycles N     AF2 recycles (default: 3)
+--fix-pos SPEC       Hold positions at the target's residue, e.g. '306-311'.
+                     PDB residue numbers, ColabDesign's syntax (default: none)
+--fix-pos-inverse    Design only the --fix-pos positions, hold the rest
 --w-plddt W          Weight for pLDDT in fitness (default: 1.0)
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
 --w-ptm W            Weight for pTM (default: 0.0)
@@ -572,6 +575,44 @@ Neither has a "good" direction imposed: a search may want to stay near native
 question about the experiment, not about the metric. Both are measured against
 the native sequence rather than whatever `--initial-seq` a run started from, so
 a continued run reports on the same footing.
+
+### Holding positions fixed
+
+`--fix-pos` keeps chosen positions at the target's own residue, so the search
+only explores the rest. The syntax follows ColabDesign's
+(`colabdesign.shared.prep.prep_pos`): comma-separated segments, ranges with a
+hyphen, and **PDB residue numbers**.
+
+```bash
+# Keep the VQIVYK motif and design around it
+uv run python run_search.py --n-steps 100 --fix-pos 306-311
+
+# The opposite: design only VQIVYK and hold the other 67 positions
+uv run python run_search.py --n-steps 100 --fix-pos 306-311 --fix-pos-inverse
+```
+
+**They are residue numbers, not sequence indices**, and the two differ on every
+target here: the PHF construct runs 306-378 (tau numbering), so VQIVYK is
+`306-311` and *not* `1-6`; the 6ELM monomer runs 452-549. Passing `1-6` is
+rejected with the valid range rather than quietly fixing nothing. The startup
+log prints what was resolved -- `Fixing 6 of 73 positions (residues 306-311); 67
+designable` -- so a mistake shows up before AF2 loads.
+
+Two departures from ColabDesign, both because this pipeline designs **one
+sequence that every chain shares**:
+
+* A chain prefix (`A306-311`) is refused rather than ignored -- a position
+  cannot be fixed in one copy and free in another.
+* `--fix-pos-inverse` is the flag spelling of ColabDesign's `inverse=True`.
+
+A held position is meant to carry the target's residue, so starting from an
+`--initial-seq` that disagrees there is an error rather than a silent
+overwrite. `--n-mutations` larger than the number of designable positions is
+also refused.
+
+`designable` reaches the search as a list of sequence indices, and
+`mutate_sequence` honours it. **A replacement search strategy has to honour it
+too**, or `--fix-pos` silently stops working.
 
 ### Which metrics are present when
 

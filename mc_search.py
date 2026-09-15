@@ -30,6 +30,10 @@ class MonteCarloSearch:
     weighted; without one, an evaluator is built from `predictor`, `ref_coords`
     and the pLDDT/RMSD weights, i.e. structure terms only.
 
+    `designable` restricts which sequence indices may be mutated; None means
+    all of them. A replacement search strategy has to honour it the same way,
+    or `--fix-pos` silently stops working.
+
     `w_plddt` and `w_rmsd` belong to the evaluator. Passing them *alongside* an
     evaluator is refused rather than silently ignored -- a search that quietly
     optimizes a different objective than the caller asked for is worse than a
@@ -48,6 +52,7 @@ class MonteCarloSearch:
         save_interval: int = 1,
         structures_dir: str | None = None,
         evaluator: SequenceEvaluator | None = None,
+        designable: list[int] | None = None,
     ):
         if evaluator is None:
             if predictor is None or ref_coords is None:
@@ -76,6 +81,7 @@ class MonteCarloSearch:
         self.w_rmsd = evaluator.w_rmsd
         self.save_interval = save_interval
         self.structures_dir = structures_dir
+        self.designable = designable
 
         if self.structures_dir is not None:
             os.makedirs(self.structures_dir, exist_ok=True)
@@ -127,7 +133,9 @@ class MonteCarloSearch:
 
     def step(self) -> dict:
         """One MC step: mutate -> predict -> evaluate -> accept/reject."""
-        new_seq = mutate_sequence(self.current_seq, self.n_mutations)
+        new_seq = mutate_sequence(
+            self.current_seq, self.n_mutations, designable=self.designable
+        )
         result = self._evaluate(new_seq)
 
         delta = result["fitness"] - self.current_fitness

@@ -11,6 +11,7 @@ import numpy as np
 from aggrescan import METRICS as AGGRESCAN_METRICS
 from ddg import CHAIN_REDUCTIONS as DDG_CHAIN_REDUCTIONS
 from mpnn_score import DEFAULT_N_EVAL as DEFAULT_MPNN_N_EVAL
+from utils import designable_indices, parse_positions
 
 # Default: PHF tau (5O3L) for backward compatibility
 DEFAULT_PDB_ID = "5O3L"
@@ -63,6 +64,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--num-recycles", type=int, default=3, help="AF2 recycles"
+    )
+    parser.add_argument(
+        "--fix-pos",
+        default=None,
+        help="Hold these positions at the target's own residue, e.g. "
+        "'306-311,320'. **PDB residue numbers**, as ColabDesign takes them -- "
+        "on the PHF target VQIVYK is 306-311, not 1-6. Comma-separated, ranges "
+        "with a hyphen; no chain prefix, since every chain shares one sequence",
+    )
+    parser.add_argument(
+        "--fix-pos-inverse",
+        action="store_true",
+        help="Invert --fix-pos: design *only* the listed positions and hold "
+        "everything else, which is ColabDesign's inverse=True",
     )
     parser.add_argument(
         "--w-plddt", type=float, default=1.0, help="pLDDT weight in fitness"
@@ -239,6 +254,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def reference_residue_numbers(pdb_path: str, chain: str) -> list[int]:
+    """PDB residue number of each position of `chain`, in sequence order."""
+    from Bio.PDB import PDBParser
+
+    structure = PDBParser(QUIET=True).get_structure("reference", pdb_path)
+    return [
+        residue.id[1]
+        for residue in structure[0][chain].get_residues()
+        if residue.id[0] == " "
+    ]
+
+
+def _summarize_positions(numbers: list[int]) -> str:
+    """Collapse a sorted list into ranges, so a log line stays readable."""
+    if not numbers:
+        return "none"
+    spans, start, previous = [], numbers[0], numbers[0]
+    for number in numbers[1:]:
+        if number == previous + 1:
+            previous = number
+            continue
+        spans.append((start, previous))
+        start = previous = number
+    spans.append((start, previous))
+    return ",".join(f"{a}" if a == b else f"{a}-{b}" for a, b in spans)
+
+
 def esm_scores_enabled(args) -> bool:
     if args.esm_scores == "auto":
         return args.w_amyloid != 0.0 or args.w_llps != 0.0
@@ -389,6 +431,62 @@ def main():
             f"{native_path}, which prepare_reference.py writes."
         )
 
+    # --fix-pos speaks PDB residue numbers, so the reference structure has to
+    # say which number each sequence position carries.
+    designable = None
+    if args.fix_pos is not None:
+        reference_pdb = os.path.join("data", f"{prefix}.pdb")
+        if not os.path.exists(reference_pdb):
+            parser.error(
+                f"--fix-pos needs the reference structure {reference_pdb} to "
+                "map residue numbers onto sequence positions; "
+                "prepare_reference.py writes it."
+            )
+        residue_numbers = reference_residue_numbers(reference_pdb, chains[0])
+        if len(residue_numbers) != n_residues:
+            parser.error(
+                f"{reference_pdb} chain {chains[0]} has "
+                f"{len(residue_numbers)} residues but the target has "
+                f"{n_residues}"
+            )
+        try:
+            fixed = parse_positions(args.fix_pos)
+            designable = designable_indices(
+                residue_numbers, fixed, inverse=args.fix_pos_inverse
+            )
+        except ValueError as exc:
+            parser.error(f"--fix-pos: {exc}")
+
+        held = sorted(set(range(n_residues)) - set(designable))
+        # Held positions are meant to carry the target's own residue. If the
+        # starting sequence disagrees, say so rather than overwriting what the
+        # caller asked to start from.
+        if native_sequence is not None:
+            conflicts = [
+                f"{residue_numbers[i]}{native_sequence[i]}->{initial_seq[i]}"
+                for i in held
+                if initial_seq[i] != native_sequence[i]
+            ]
+            if conflicts:
+                parser.error(
+                    "the initial sequence differs from the target's at "
+                    f"position(s) held by --fix-pos: {', '.join(conflicts)}. "
+                    "Those positions cannot be both fixed to the target "
+                    "residue and started elsewhere."
+                )
+        if args.n_mutations > len(designable):
+            parser.error(
+                f"--n-mutations {args.n_mutations} exceeds the "
+                f"{len(designable)} designable position(s) left by --fix-pos"
+            )
+        logger.info(
+            "Fixing %d of %d positions (residues %s); %d designable",
+            len(held),
+            n_residues,
+            _summarize_positions([residue_numbers[i] for i in held]),
+            len(designable),
+        )
+
     # prepare_reference.py writes 'X' where a chain holds a non-standard
     # residue, and neither the mutation operator nor AGGRESCAN can act on one.
     # Caught here, before AF2 spends time loading its parameters.
@@ -508,6 +606,7 @@ def main():
         save_interval=args.save_interval,
         structures_dir=args.structures_dir,
         evaluator=evaluator,
+        designable=designable,
     )
 
     logger.info(
