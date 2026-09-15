@@ -8,6 +8,8 @@ import os
 import numpy as np
 
 from aggrescan import METRICS as AGGRESCAN_METRICS
+from ddg import CHAIN_REDUCTIONS as DDG_CHAIN_REDUCTIONS
+from mpnn_score import DEFAULT_N_EVAL as DEFAULT_MPNN_N_EVAL
 
 # Default: PHF tau (5O3L) for backward compatibility
 DEFAULT_PDB_ID = "5O3L"
@@ -75,11 +77,49 @@ def build_parser() -> argparse.ArgumentParser:
         "and recorded regardless (default: 0.0, report only)",
     )
     parser.add_argument(
+        "--w-ddg",
+        type=float,
+        default=0.0,
+        help="ThermoMPNN ddG weight in fitness. ddG is positive-is-destabilizing, "
+        "so use a NEGATIVE weight to favour stable designs (default: 0.0, "
+        "report only). Needs a matrix from precompute_ddg.py",
+    )
+    parser.add_argument(
+        "--ddg-chain-reduction",
+        choices=list(DDG_CHAIN_REDUCTIONS),
+        default="mean",
+        help="How to combine the chain copies of a position (default: mean)",
+    )
+    parser.add_argument(
         "--aggrescan-metric",
         choices=list(AGGRESCAN_METRICS),
         default="na4vss",
         help="Which AGGRESCAN scalar enters the fitness; all are recorded "
         "(default: na4vss)",
+    )
+
+    mpnn = parser.add_argument_group("ProteinMPNN inverse-folding score")
+    mpnn.add_argument(
+        "--mpnn-scores",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="Score candidates with ProteinMPNN on the reference backbone. "
+        "auto = on when --w-mpnn is nonzero (default: auto)",
+    )
+    mpnn.add_argument(
+        "--w-mpnn",
+        type=float,
+        default=0.0,
+        help="ProteinMPNN weight in fitness. The score is a negative log "
+        "probability, so LOWER is better and a NEGATIVE weight rewards "
+        "sequences ProteinMPNN likes (default: 0.0, report only)",
+    )
+    mpnn.add_argument(
+        "--mpnn-n-eval",
+        type=int,
+        default=DEFAULT_MPNN_N_EVAL,
+        help="Decoding orders to average over. The score is stochastic: 1 gives "
+        "~0.019 spread, 10 gives ~0.006 (default: 10)",
     )
 
     # Sequence-level scores (amyloid-predict / LLPS-predict, Lobo et al. 2026)
@@ -147,6 +187,40 @@ def esm_scores_enabled(args) -> bool:
     if args.esm_scores == "auto":
         return args.w_amyloid != 0.0 or args.w_llps != 0.0
     return args.esm_scores == "on"
+
+
+def mpnn_scores_enabled(args) -> bool:
+    if args.mpnn_scores == "auto":
+        return args.w_mpnn != 0.0
+    return args.mpnn_scores == "on"
+
+
+def build_mpnn_scorer(parser, args, reference_pdb: str, chains: list[str]):
+    """Construct the MPNNScorer, or None when the score is switched off."""
+    if not mpnn_scores_enabled(args):
+        if args.w_mpnn != 0.0:
+            parser.error(
+                "--mpnn-scores off leaves the ProteinMPNN term uncomputed, but "
+                "--w-mpnn is nonzero."
+            )
+        return None
+
+    if not os.path.exists(reference_pdb):
+        parser.error(
+            f"--mpnn-scores needs the reference backbone {reference_pdb}, which "
+            f"prepare_reference.py writes. Run it for {args.pdb_id} first."
+        )
+
+    from mpnn_score import MPNNScorer
+
+    try:
+        return MPNNScorer(
+            pdb_filename=reference_pdb,
+            chains=",".join(chains),
+            n_eval=args.mpnn_n_eval,
+        )
+    except ValueError as exc:
+        parser.error(f"bad ProteinMPNN settings: {exc}")
 
 
 def build_scorer(parser, args):
@@ -257,6 +331,54 @@ def main():
             "cleaned --initial-seq."
         )
 
+    mpnn_scorer = build_mpnn_scorer(
+        parser, args, os.path.join("data", f"{prefix}.pdb"), chains
+    )
+
+    # Cheap (a ~30 kB table), so loaded before AF2 to fail early on a mismatch.
+    import ddg as ddg_module
+
+    ddg_lookup = ddg_module.load_if_available(
+        args.pdb_id, chains, chain_reduction=args.ddg_chain_reduction
+    )
+    if ddg_lookup is None and args.w_ddg != 0.0:
+        parser.error(
+            f"--w-ddg is {args.w_ddg} but no ddG matrix exists for "
+            f"{args.pdb_id} chains {args.chains}. Generate one with "
+            "precompute_ddg.py, or leave --w-ddg at 0."
+        )
+    if ddg_lookup is not None:
+        if len(ddg_lookup.reference) != n_residues:
+            parser.error(
+                f"the ddG matrix covers {len(ddg_lookup.reference)} residues "
+                f"but the target has {n_residues}; they must describe the same "
+                "target."
+            )
+        # ddG is measured against the matrix's own reference sequence, so a
+        # stale or mis-labelled matrix would shift every number without
+        # erroring. precompute_ddg.py takes --reference-pdb independently of
+        # the name it writes under, which is exactly how that happens.
+        native_path = os.path.join("data", f"{prefix}_sequence.txt")
+        if os.path.exists(native_path):
+            with open(native_path) as handle:
+                native = handle.read().strip()
+            if native != ddg_lookup.reference:
+                parser.error(
+                    f"the ddG matrix in {ddg_lookup.path} was built for a "
+                    f"different sequence than {native_path}. Every ddG would "
+                    "be measured from the wrong baseline; regenerate it with "
+                    "precompute_ddg.py."
+                )
+
+    # MPNN scores the same backbone, so this catches a wrong-length
+    # --initial-seq before AF2 loads, matching the ddG check above. The
+    # scorer's own length check would otherwise fire a minute later.
+    if mpnn_scorer is not None and len(initial_seq) != n_residues:
+        parser.error(
+            f"the initial sequence has {len(initial_seq)} residues but the "
+            f"target has {n_residues}."
+        )
+
     # Setup predictor
     logger.info(
         "Initializing AF2 predictor (length=%d, copies=%d, recycles=%d)",
@@ -279,12 +401,18 @@ def main():
         w_amyloid=args.w_amyloid,
         w_llps=args.w_llps,
         w_aggrescan=args.w_aggrescan,
+        w_ddg=args.w_ddg,
+        w_mpnn=args.w_mpnn,
         scorer=scorer,
+        ddg_lookup=ddg_lookup,
+        mpnn_scorer=mpnn_scorer,
         amyloid_agg=args.amyloid_agg,
         aggrescan_metric=args.aggrescan_metric,
     )
     logger.info(
-        "Fitness terms: pLDDT, RMSD, AGGRESCAN%s",
+        "Fitness terms: pLDDT, RMSD, AGGRESCAN%s%s%s",
+        ", ddG" if ddg_lookup is not None else "",
+        ", ProteinMPNN" if mpnn_scorer is not None else "",
         ", amyloid, LLPS" if scorer is not None else "",
     )
 

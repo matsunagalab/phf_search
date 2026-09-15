@@ -10,12 +10,16 @@ mc_search.py         - Monte Carlo search engine (mutate -> evaluate -> accept/r
 evaluate.py          - SequenceEvaluator: sequence -> all metrics + fitness (search-strategy agnostic)
 esm_scores.py        - ESMScorer: amyloid / LLPS probabilities from ESM2-3B embeddings
 aggrescan.py         - AGGRESCAN reimplementation (a3v scale + sliding window + hot spots)
-fitness.py           - Fitness function (w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN)
+mpnn_score.py        - MPNNScorer: ProteinMPNN inverse-folding score via ColabDesign's bundled model
+ddg.py               - DDGLookup: candidate ddG by summing a precomputed ThermoMPNN matrix
+precompute_ddg.py    - One-time: run ThermoMPNN site-saturation -> models/ddg/*.npz
+fitness.py           - Fitness function (structural terms + amyloid + LLPS + AGGRESCAN + ddG)
 utils.py             - Kabsch RMSD, chain-permutation RMSD minimization, sequence mutation
 prepare_reference.py - Extract reference CA coordinates and sequence from any PDB
 run_search.py        - CLI entry point (--pdb-id, --chains for target selection)
 download_params.sh   - AF2 parameter download
 models/esm_heads/    - Vendored logistic-regression checkpoints for the two sequence scores
+models/ddg/          - Precomputed ThermoMPNN ddG matrices (~30 kB each, committed)
 pyproject.toml       - Project definition (managed by uv)
 ```
 
@@ -57,6 +61,11 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 | `--w-plddt` | 1.0 | pLDDT weight |
 | `--w-rmsd` | 1.0 | RMSD weight |
 | `--w-aggrescan` | 0.0 | AGGRESCAN weight; negative penalizes |
+| `--mpnn-scores` | `auto` | `auto` (on when `--w-mpnn` is nonzero) / `on` / `off` |
+| `--w-mpnn` | 0.0 | ProteinMPNN weight. Score is a negative log probability, so LOWER is better and the weight should be NEGATIVE |
+| `--mpnn-n-eval` | 10 | Decoding orders averaged; the score is stochastic |
+| `--w-ddg` | 0.0 | ThermoMPNN ddG weight. Positive ddG = destabilizing, so use a NEGATIVE weight for stable designs |
+| `--ddg-chain-reduction` | `mean` | Combine chain copies: `mean` / `middle` / `sum` |
 | `--aggrescan-metric` | `na4vss` | Which AGGRESCAN scalar enters the fitness: `na4vss` / `a3vsa` / `thsar` (nhs/nnhs are recorded but too coarse to optimize) |
 | `--esm-scores` | `auto` | `auto` (on when a weight is nonzero) / `on` / `off` |
 | `--w-amyloid` | 0.0 | Amyloidogenicity weight; negative penalizes |
@@ -80,7 +89,7 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 
 - **Prediction**: ColabDesign hallucination protocol, non-multimer (ptm models), configurable `copies` (5 for PHF, 1 for monomers)
 - **Structure comparison**: Kabsch RMSD over all n_chains! chain permutations, taking the minimum (trivial for monomers)
-- **Fitness**: `w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN` (higher is better; a metric passed as `None` drops out of the sum). Everything past `w_rmsd` in `compute_fitness` is keyword-only: each added metric used to shift the positional arguments of the ones after it, silently reassigning a caller's weights
+- **Fitness**: `w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN + w_ddg * ddG` (higher is better; a metric passed as `None` drops out of the sum). Everything past `w_rmsd` in `compute_fitness` is keyword-only: each added metric used to shift the positional arguments of the ones after it, silently reassigning a caller's weights
 - **Sequence scores**: ESM2-3B (layer 36, mean-pooled) -> logistic regression, per Lobo et al., PNAS 123:e2531932123 (2026). ESM2 is loaded once and shared by both heads, the windows of a candidate are batched together, and results are cached per sequence. Agrees with the upstream `amyloid-predict` / `llps-predict` CLIs to <1e-6 on the three values tested (VQIVYK via the 6aa and general heads, the tau 73mer via the LLPS head) -- re-check after changing batching, dtype or device, since the equivalence is empirical, not structural
 - **Recorded metrics**: `amyloid_mean` and `amyloid_max` (likewise for LLPS) are always both written to every record, and `amyloid`/`llps` hold the aggregate the fitness used (`--amyloid-agg`; the LLPS term always uses the mean, which equals the score under whole-sequence LLPS scoring). Selecting one aggregate must never cost the other, since a rerun means redoing every ESM evaluation
 - **CLI surface**: only the knobs that change results or unblock a machine are flags. LLPS windowing, the amyloid classifier policy and the checkpoint directory are `ESMScorer` constructor arguments, whose defaults are the lengths and heads the published classifiers were trained for
@@ -89,6 +98,13 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 - **AGGRESCAN scale trap**: `na4vss` is a sum of order -13, not a probability, so `--w-aggrescan 1.0` outweighs the whole pLDDT term thirteen times over. Sensible weights start around 0.01-0.05. `nhs`/`nnhs` are recorded but excluded from `METRICS`: over a fixed-length target they take a handful of distinct values (three across all 1387 single mutants of the 73-residue PHF core) and the steps are threshold noise. Every hot spot carries a `margin` for exactly that reason -- on native PHF tau one hot spot clears `HST` by 0.50 and the other by 0.0026
 - **TANGO / WALTZ**: deliberately absent. TANGO ships as a licensed compiled binary (no source), WALTZ is web-server only and its score depends on a FoldX-derived matrix. AGGRESCAN stands in for TANGO's role and the `6aa` head for WALTZ's; neither reproduces the original numbers, so do not compare results here against published TANGO/WALTZ values
 - **GPU memory**: ESM2-3B moves onto the GPU at the first scored candidate and peaks at ~11.1 GiB there (measured, default batching, RTX A6000) on top of AF2's allocation, so `run_search.py` sets `XLA_PYTHON_CLIENT_PREALLOCATE=false` when the scores are on and ESM2 is on the GPU (before importing `predict`); set the variable yourself to override. Cost per candidate ~3 s against ~10 s for the AF2 prediction; two ESM forward passes at the default `--esm-toks-per-batch 4096`, three at 1024
+- **ddG**: ThermoMPNN (Dieckhaus et al., PNAS 121:e2314851121, 2024; MIT) site-saturation is precomputed once per target by `precompute_ddg.py` into `models/ddg/<prefix>_thermompnn.npz` (~27 kB, committed); the search only sums table entries (~7 us/candidate, no torch). **Positive ddG = destabilizing**, so `--w-ddg` must be NEGATIVE to favour stable designs; native is exactly 0. `precompute_ddg.py` loads ThermoMPNN's `TransferModel` directly rather than through its Lightning wrapper, which keeps pytorch-lightning, wandb, omegaconf and tqdm out of the dependency set -- `_Cfg` there is a 6-field stand-in for its OmegaConf cfg, and `load_state_dict` is strict so a hyperparameter mismatch fails loudly
+- **ddG gaps are fatal, loudly**: `precompute_ddg.py` leaves NaN where the structure does not model a residue, and a NaN fitness makes both branches of the Metropolis criterion false -- every candidate rejected, run reports success, nothing searched. `ddg.py` therefore raises on a NaN lookup, `precompute_ddg.py` warns with a NaN count, and `SequenceEvaluator` refuses any non-finite fitness whatever produced it. The shipped 5O3L matrix has 0 NaN of 7300; 6GX5 (275-305 unobserved) is the kind of target that would trip it
+- **ddG chain reductions**: `mean` (default) and `middle` are interchangeable here (correlation 0.98), but `sum` multiplies the term by the chain count -- 8.08 vs 1.62 for I3D on the 5-chain target -- so a weight tuned under one is wrong under the other. `middle` takes index `n//2`, which for an even chain count is the upper of the two central chains
+- **ddG limits**: a k-mutation candidate is the sum of k single-mutant predictions (no epistasis, error grows with k); ThermoMPNN was trained on Megascale globular domains, so a fibril core is out of distribution; and every number is for a mutation of the reference backbone, not of the candidate's predicted structure. For an academic licence, FoldX or PyRosetta is the more defensible physics-based route
+- **ProteinMPNN score**: `mean(-log p(residue | backbone))` from the ProteinMPNN bundled in ColabDesign (`v_48_020`), so no new dependency. Lower is better -> `--w-mpnn` must be NEGATIVE. Native scores 0.588 on the PHF reference; poly-alanine 0.733, native reversed 0.949, poly-tryptophan 1.246, so the usable span is ~0.6 (poly-alanine alone would suggest ~0.15 and underestimate it). Stochastic: SD 0.019 at n_eval=1, 0.006 at 10, ~18 ms per evaluation. Differences below ~0.01 are noise. The isolated 180 ms at n_eval=10 understates the in-run cost -- a full run went from ~11.9 s to ~13 s per step, untraced
+- **ProteinMPNN gotchas found by measurement**: (a) ColabDesign's score differs from the original PyTorch tool by 0.0084 on the same input, which is about 2x the standard error of the 30-order average being compared (~0.004) and therefore a resolvable systematic difference, not noise -- the 0.021 figure is the spread of a *single* evaluation and must not be used as the comparison scale; cause unidentified, and it is NOT the 20-vs-21 letter normalization; (b) ColabDesign orders residues as AlphaFold does (`ARNDCQEGHILKMFPSTWYV`), not as ProteinMPNN does, so decoding `_inputs["S"]` with the wrong table yields a wrong-but-plausible reference sequence; (c) `score()` overwrites `_inputs["S"]` in place because `copy_dict` shares leaf arrays, which is why its `seqid` is always 1.0 and why `MPNNScorer` snapshots the reference before the first call
+- **Homo-oligomers only**: ColabDesign's `_prep_hallucination` takes a scalar `length` and hardcodes `get_multi_id(..., homooligomer=True)`, so hetero-oligomers cannot be searched. Two metrics encode that assumption: `min_permutation_rmsd` permutes all n_chains! chains (valid only when they share a sequence), and `precompute_ddg.py` refuses chains that differ. Both are correct for homo and fail loudly rather than silently for hetero
 - **MC acceptance**: Metropolis criterion `exp(delta_fitness / temperature)`
 - **PDB saving**: `model.save_pdb(filename=None, get_best=False)` returns PDB string (note: `save_current_pdb` has a missing `return` in ColabDesign)
 - **Reference files**: `data/<pdb_id>_<chains>_ca_coords.npy`, `data/<pdb_id>_<chains>_sequence.txt`

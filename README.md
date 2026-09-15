@@ -11,14 +11,15 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 | Aspect | Details |
 |--------|---------|
 | **Search space** | Strings of length *L* over a 20-letter alphabet (amino acids) |
-| **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN` |
+| **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN + w_ddg * ddG + w_mpnn * mpnn` |
 | **Evaluation cost** | ~seconds per call on GPU (AlphaFold2 forward pass) |
 
 ## What the metrics mean
 
-No biology background needed. Two metrics come from the 3D structure AF2
-predicts for a candidate; three more are read off the sequence alone, far more
-cheaply, and say nothing about the predicted structure.
+No biology background needed. Two come from the 3D structure AF2 predicts for a
+candidate. Three more are read off the sequence, far more cheaply, and say
+nothing about that predicted structure -- the last of them, ddG, is scored
+against the *reference* structure instead.
 
 | Metric | Range | Direction | What it asks |
 |--------|-------|-----------|--------------|
@@ -27,6 +28,8 @@ cheaply, and say nothing about the predicted structure.
 | **amyloid** | 0 to 1 | higher | "Does this sequence read like one that forms amyloid fibrils?" |
 | **LLPS** | 0 to 1 | usually lower | "Does it read like one that condenses into liquid droplets instead?" |
 | **AGGRESCAN** | unbounded | higher | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
+| **ddG** | kcal/mol | **lower** | "Would these substitutions make the target structure less stable?" Positive = destabilizing |
+| **mpnn** | ~0 to 3 | **lower** | "Would an inverse-folding model have proposed this sequence for this backbone?" |
 
 **pLDDT** is the predictor's own confidence, averaged over residues. Above ~0.8
 AF2 is asserting a definite fold; below ~0.5 it is effectively saying "I don't
@@ -66,6 +69,8 @@ serve that goal in different roles, so their target values are not symmetric.
 | **amyloid** (mean) | **>= ~0.23** | Keep it at or above the real filament sequence; there is no reason to push it toward 1.0 (see below) |
 | **LLPS** | **<= ~0.50** | Droplets are the competing fate of tau. Lower than native steers toward the fibril -- a hypothesis you choose to encode, not an established correction |
 | **AGGRESCAN** | **>= ~-13.5** (`na4vss`) | Second opinion on the amyloid score, from a completely different method. Read it relative to native, never as an absolute |
+| **mpnn** | **<= ~0.59** | Is the sequence at least as plausible for this backbone as native? Native scores 0.588; a scrambled or homopolymer sequence runs 0.73-1.25 (see below). Read differences below ~0.01 as noise |
+| **ddG** | **<= 0** | Does the design hold the reference fold together at least as well as native? Native is 0 by definition, so any positive value is a design that ThermoMPNN thinks destabilizes the filament |
 
 **Where you start.** The same metrics, measured here on the native PHF tau
 sequence itself (5O3L, 73 residues) -- the sequence that does form the target
@@ -79,6 +84,7 @@ filament in reality:
 | amyloid (max) | 0.996 | but it holds an almost maximally amyloidogenic window (VQIVYK, residues 1-6) |
 | LLPS | 0.50 | right on the boundary; tau is known to do both |
 | AGGRESCAN `na4vss` | -13.50 | one solid hot spot at residues 1-6 (VQIVYK), plus one that is an artifact -- see below |
+| ProteinMPNN `mpnn_score` | 0.588 | for scale: poly-alanine 0.733, the native sequence reversed 0.949, poly-tryptophan 1.246 |
 
 Two things to read carefully in that last row.
 
@@ -209,6 +215,9 @@ Search parameters:
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
 --w-aggrescan W      Weight for AGGRESCAN; negative penalizes (default: 0.0)
 --aggrescan-metric M na4vss | a3vsa | thsar (default: na4vss)
+--w-ddg W            Weight for ThermoMPNN ddG. Use a NEGATIVE weight to favour
+                     stable designs, since positive ddG is destabilizing (default: 0.0)
+--ddg-chain-reduction R  mean | middle | sum over the chain copies (default: mean)
 
 Sequence-level scores (language model; AGGRESCAN is always on):
 --esm-scores MODE    auto | on | off (default: auto = on if a weight is nonzero)
@@ -267,6 +276,114 @@ additional files, but the server assigns the extreme terminal residues an
 unspecified value "to account for charge effects" that the publication does not
 give. Here those residues inherit the nearest window centre, so profiles can
 differ at the ends. Do not report these numbers as server output.
+
+### ddG (ThermoMPNN)
+
+[ThermoMPNN](https://github.com/Kuhlman-Lab/ThermoMPNN) (Dieckhaus et al., *PNAS*
+**121**, e2314851121, 2024; MIT) predicts the stability change of a point
+mutation from structure. It scores every single mutation of a structure in one
+pass -- 7300 mutations over the 5-chain PHF reference in ~4 s -- so it never
+runs inside the search. `precompute_ddg.py` writes the whole
+`(n_chains, n_residues, 20)` matrix to `models/ddg/` once, and `ddg.py` adds up
+the entries for the positions a candidate changed: **~7 microseconds**, no
+torch, no 39 MB checkpoint. The matrix for the default target is committed
+(27 kB), so nothing needs installing; other targets need one run of
+`precompute_ddg.py` against a ThermoMPNN checkout.
+
+```bash
+git clone https://github.com/Kuhlman-Lab/ThermoMPNN
+uv run python precompute_ddg.py --thermompnn-dir ThermoMPNN     # once, per target
+uv run python run_search.py --n-steps 100 --w-ddg -0.5          # negative weight!
+```
+
+**Positive ddG is destabilizing**, so a search after stable designs wants a
+**negative** `--w-ddg`. Native scores exactly 0 -- it is the reference.
+
+Three limits, all real:
+
+1. **Additivity.** A candidate differing at *k* positions is scored as the sum
+   of *k* independent single-mutant predictions. Epistasis is invisible and the
+   error grows with *k*: treat it as a ranking signal among near neighbours, not
+   a free energy. A sequence 30 mutations out is past what this can honestly
+   estimate.
+2. **Out of distribution.** ThermoMPNN was trained on Megascale -- small
+   globular domains measured by proteolysis. A fibril core is held together by
+   inter-chain stacking, and "folding stability" is not the same quantity. It is
+   used here because it is cheap and structure-aware, not because it was
+   validated on fibrils. (This is also why the physics-based route, FoldX or
+   Rosetta, is the more defensible one when a licence is available.)
+3. **Fixed reference backbone.** Every number describes a mutation of the
+   reference structure, not of the structure AF2 predicts for the candidate.
+
+The matrix is built on the full assembly, so inter-chain contacts are in the
+model's input: on 5O3L, I3D scores +0.36 against a lone chain and **+1.62**
+under the default `mean` reduction over the five stacked copies.
+
+`--ddg-chain-reduction` picks how those copies combine. They are not equivalent
+-- per chain that same mutation gives [1.34, 1.60, 1.76, 1.68, 1.70], lowest at
+the two ends of the stack, which have one neighbour rather than two. `mean` and
+`middle` differ little (the middle chain correlates 0.98 with the mean), but
+**`sum` is on a different scale entirely**: it multiplies the term by the chain
+count, so 8.08 instead of 1.62 here, and a weight tuned under `mean` becomes
+five times stronger.
+
+### ProteinMPNN score
+
+The inverse-folding model's own opinion of a sequence: the mean negative log
+probability it assigns, given the target coordinates. **Lower is better**, so
+`--w-mpnn` must be **negative** to reward sequences ProteinMPNN likes.
+
+It answers a genuinely different question from the rest. RMSD asks whether AF2
+folds the sequence onto the target; the amyloid indices ask whether the sequence
+reads like an aggregator; this asks whether a design model would have *proposed*
+the sequence for this backbone -- which is the criterion the sequences were
+generated under in the first place.
+
+```bash
+uv run python run_search.py --n-steps 100 --mpnn-scores on          # record only
+uv run python run_search.py --n-steps 100 --w-mpnn -1.0             # negative weight!
+```
+
+This comes from the ProteinMPNN bundled inside ColabDesign, using the
+`v_48_020` weights -- already a dependency, so no new package and no new
+checkpoint.
+
+**Know the scale.** Measured on the PHF reference at `n_eval=5`:
+
+| sequence | `mpnn_score` |
+|---|---|
+| native | 0.588 |
+| poly-alanine | 0.733 |
+| poly-glycine | 0.791 |
+| poly-aspartate | 0.836 |
+| native reversed | 0.949 |
+| poly-proline | 1.136 |
+| poly-tryptophan | 1.246 |
+
+So the usable span is roughly **0.6**. Poly-alanine is a mild perturbation, not
+an extreme -- calibrating a weight against it alone would underestimate how hard
+this term pulls once a search wanders somewhere genuinely implausible.
+
+The score is also stochastic, because ProteinMPNN decodes in a random order:
+
+| `--mpnn-n-eval` | spread (SD) | cost per candidate |
+|---|---|---|
+| 1 | 0.019 | ~18 ms |
+| 3 | 0.013 | ~53 ms |
+| 10 (default) | 0.006 | ~180 ms |
+
+At `n_eval=1` the noise is larger than the effect of most single mutations, so
+the search would be optimizing the random number generator. Even at the default,
+treat a difference below ~0.01 as noise.
+
+Those costs are measured in isolation. In a full run the per-step time went from
+~11.9 s to ~13 s with this term on, i.e. closer to +1 s than the +0.18 s the
+table implies; the extra was not traced (GPU contention or JAX recompilation are
+both plausible). Either way it is a small fraction of the AF2 call.
+
+Also recorded is `mpnn_identity`, the fraction of positions still matching the
+reference sequence -- a plain drift counter. ColabDesign's own `seqid` output is
+not used: it compares the scored sequence against itself and is always 1.0.
 
 ### Why not TANGO and WALTZ?
 

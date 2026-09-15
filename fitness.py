@@ -7,14 +7,19 @@ def compute_fitness(
     amyloid: float | None = None,
     llps: float | None = None,
     aggrescan: float | None = None,
+    ddg: float | None = None,
+    mpnn: float | None = None,
     w_amyloid: float = 0.0,
     w_llps: float = 0.0,
     w_aggrescan: float = 0.0,
+    w_ddg: float = 0.0,
+    w_mpnn: float = 0.0,
 ) -> float:
     """Fitness score, higher is better.
 
-        w_plddt * pLDDT - w_rmsd * RMSD
-            + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN
+        w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid
+            + w_llps * LLPS + w_aggrescan * AGGRESCAN + w_ddg * ddG
+            + w_mpnn * mpnn_score
 
     Structural terms (always present):
         plddt: AF2 confidence in [0, 1], higher = more confident
@@ -26,6 +31,13 @@ def compute_fitness(
         aggrescan: an AGGRESCAN summary scalar (aggrescan.score). Unlike the
             two probabilities this is unbounded and can be negative, so its
             weight is not on the same scale as theirs.
+        ddg: predicted stability change in kcal/mol (ddg.DDGLookup), where
+            **positive is destabilizing**. A search after stable designs
+            therefore wants a negative `w_ddg`.
+        mpnn: ProteinMPNN score (mpnn_score.MPNNScorer) -- mean negative log
+            probability of the sequence given the backbone, so **lower is
+            better** and a search that wants sequences ProteinMPNN likes needs
+            a negative `w_mpnn`.
 
     A term with weight 0 does not move the fitness, which is how a metric is
     reported without being optimized. Weights may be negative: `w_llps = -1.0`
@@ -44,4 +56,8 @@ def compute_fitness(
         fitness += w_llps * llps
     if aggrescan is not None:
         fitness += w_aggrescan * aggrescan
+    if ddg is not None:
+        fitness += w_ddg * ddg
+    if mpnn is not None:
+        fitness += w_mpnn * mpnn
     return fitness
