@@ -20,29 +20,29 @@ No biology background needed. They fall into four groups, and the distinction
 between the first two is the one that matters most:
 
 * **AF2's confidence in its own answer** -- pLDDT, pTM, ipTM, iPAE. These need
-  no reference structure, which also means **they can be high for a
-  confidently wrong shape.**
+  no reference structure, which also means **they can be high for a confidently
+  wrong shape, and none of them measures shape fidelity at all.**
 * **Similarity to the experimental target** -- RMSD, TM-score, lDDT, Fnat.
   These are the ones that actually say whether the shape was reproduced.
 * **Read off the sequence alone** -- amyloid, LLPS, AGGRESCAN. Cheap, and blind
   to the predicted structure.
 * **The sequence judged against the reference backbone** -- ddG, mpnn.
 
-| Metric | Range | Direction | What it asks |
-|--------|-------|-----------|--------------|
-| **pLDDT** | 0 to 1 | higher | "How sure is AF2 that the shape it just predicted is right?" |
-| **RMSD** | 0 to inf (angstroms) | lower | "How far is that predicted shape from the experimental target?" |
-| **pTM** | 0 to 1 | higher | "How sure is AF2 of the overall shape, as a predicted TM-score?" |
-| **ipTM** | 0 to 1 | higher | The same restricted to **inter-chain** pairs -- how sure it is of the interface |
-| **iPAE** | 0 to 1 (also in A) | **lower** | "How large an error does AF2 expect between residues on *different* chains?" |
-| **TM-score** | 0 to 1 | higher | "Is this the same fold as the target?" Length-normalized; >0.5 is the conventional same-fold threshold |
-| **lDDT** | 0 to 1 | higher | The same question asked **without superimposing anything** -- and the quantity pLDDT claims to predict |
-| **Fnat** | 0 to 1 | higher | "How many of the target's inter-chain contacts did we recover?" For a fibril: is it stacked at all? |
-| **amyloid** | 0 to 1 | higher | "Does this sequence read like one that forms amyloid fibrils?" |
-| **LLPS** | 0 to 1 | usually lower | "Does it read like one that condenses into liquid droplets instead?" |
-| **AGGRESCAN** | unbounded | higher | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
-| **ddG** | kcal/mol | **lower** | "Would these substitutions make the target structure less stable?" Positive = destabilizing |
-| **mpnn** | ~0.6 to 1.3 | **lower** | "Would an inverse-folding model have proposed this sequence for this backbone?" |
+| Metric | Range | Direction | Aim for | Native PHF tau | What it asks |
+|--------|-------|-----------|---------|----------------|--------------|
+| **pLDDT** | 0 to 1 | higher | > 0.8 | **0.23** | "How sure is AF2 that the shape it just predicted is right?" |
+| **RMSD** | 0 to inf (A) | lower | < 5 A | **35 A** | "How far is that predicted shape from the experimental target?" |
+| **pTM** | 0 to 1 | higher | > 0.8 | 0.133 | "How sure is AF2 of the overall shape, as a predicted TM-score?" |
+| **ipTM** | 0 to 1 | higher | > 0.8 | **0.093** | The same restricted to **inter-chain** pairs -- how sure it is of the interface |
+| **iPAE** | 0 to 1 (also in A) | **lower** | < ~10 A | 27.8 A | "How large an error does AF2 expect between residues on *different* chains?" |
+| **TM-score** | 0 to 1 | higher | **> 0.5** | **0.102** | "Is this the same fold as the target?" Length-normalized; 0.5 is the conventional same-fold threshold |
+| **lDDT** | 0 to 1 | higher | > 0.7 | 0.127 | The same question asked **without superimposing anything** -- and the quantity pLDDT claims to predict |
+| **Fnat** | 0 to 1 | higher | > 0.5 | **0.0009** | "How many of the target's inter-chain contacts did we recover?" For a fibril: is it stacked at all? |
+| **amyloid** | 0 to 1 | higher | max >= ~0.99 | mean 0.23, max 0.996 | "Does this sequence read like one that forms amyloid fibrils?" |
+| **LLPS** | 0 to 1 | usually lower | <= ~0.50 | 0.50 | "Does it read like one that condenses into liquid droplets instead?" |
+| **AGGRESCAN** | unbounded | higher | >= native | -13.50 | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
+| **ddG** | kcal/mol | **lower** | <= 0 | 0 by definition | "Would these substitutions make the target structure less stable?" Positive = destabilizing |
+| **mpnn** | ~0.6 to 1.3 | **lower** | <= ~0.59 | 0.588 | "Would an inverse-folding model have proposed this sequence for this backbone?" |
 
 **pLDDT** is the predictor's own confidence, averaged over residues. Above ~0.8
 AF2 is asserting a definite fold; below ~0.5 it is effectively saying "I don't
@@ -77,7 +77,21 @@ misleading 0.
 **Shape fidelity** (`shape.py`) adds TM-score, lDDT and Fnat, plus per-chain
 `tm_score_chain` / `lddt_chain` / `rmsd_chain` so the monomer fold can be judged
 apart from the stacking. All of it runs on the CA coordinates already in hand,
-in ~385 ms per candidate (~4% of the AF2 call), with no new dependency. The
+with no new dependency.
+
+**The cost is not constant, and it peaks where a working search goes.** The
+TM-score refinement iterates more as the structures get closer, so measured on
+this target:
+
+| what is being scored | TM-score | `shape.compare` |
+|---|---|---|
+| the current starting point | 0.10 | ~250 ms |
+| native + 2 A of noise | 0.82 | ~340 ms |
+| native + 4 A of noise | 0.58 | ~530 ms |
+| native itself | 1.00 | ~150 ms |
+
+Against the ~10 s AF2 call that is a few percent either way, but it is worth
+knowing that succeeding makes this term more expensive, not less. The
 TM-score follows the `TM-score` program's iterative superposition search, so the
 0.5 threshold is meaningful; Fnat is defined on CA pairs rather than all heavy
 atoms as DockQ defines it, because a designed sequence has different side chains
@@ -100,71 +114,41 @@ relative ordering means anything. Keeping it alongside the language-model score
 is the point: when a transparent index and a learned one disagree about the same
 sequence, that disagreement is information about the indices.
 
-### Confidence is not fidelity
-
-The point of having both groups: **ipTM and iPAE do not measure shape.** They
-are AF2's self-assessment. RMSD does measure shape, but one global number
-cannot say *where* a failure is -- a single badly placed chain spoils it even
-when every chain's fold is right, and the superposition mixes the monomer fold
-together with the stacking.
-
-Measured on native PHF tau, the decomposition says what RMSD alone cannot:
-
-| | value | reading |
-|---|---|---|
-| global RMSD | 34.97 A | "not similar", and nothing more |
-| per-chain RMSD | 20.0 A | the single-chain C-shape is wrong too, so this is not only a stacking failure |
-| per-chain lDDT | 0.443 | local geometry is partly plausible |
-| global lDDT | 0.127 | the assembly is not |
-| **Fnat** | **0.0009** | of 2346 native inter-chain contacts, **0.1% recovered** -- there is no stacking |
-
-And the monomer target makes the contrast sharp. On WNK2 CCT1 (6ELM) the same
-pipeline gets TM-score **0.648**, past the 0.5 same-fold threshold, with lDDT
-0.662 and RMSD 4.0 A. So the failure on PHF is not "AF2 cannot do this" -- it is
-specific to the fibril. Comparing 4.0 A against 35 A is just two numbers;
-comparing 0.648 against 0.102 straddles an interpretable threshold.
-
 ### What counts as a good value
 
 The goal of this project is concrete: **find a sequence whose AF2 prediction is
 the PHF filament structure, in as few evaluations as possible.** The metrics
 serve that goal in different roles, so their target values are not symmetric.
 
-| Metric | Aim for | Role in this goal |
-|--------|---------|-------------------|
-| **RMSD** | **< 5 A**, ideally < 2 A | **The success criterion.** It is the only metric that directly answers "is this the PHF fold?" |
-| **pLDDT** | **> 0.8** | **Necessary companion.** A low RMSD with pLDDT ~0.3 means AF2 is not actually asserting that fold, so the match is not to be trusted |
-| **ipTM** | **> 0.8** | The interface version of that companion, and the more telling one for a fibril. Native scores 0.093 |
-| **iPAE** | **< ~10 A** | The binder-design literature's threshold for a credible interface. Native is 27.8 A -- but see the caveat below about this not being AF-Multimer |
-| **TM-score** | **> 0.5** | The same-fold threshold, and the most interpretable success criterion here. Native scores 0.102; the 6ELM monomer manages 0.648 |
-| **lDDT** | **> 0.7** | Superposition-free, so it does not inherit RMSD's sensitivity to one stray chain. Native scores 0.127 |
-| **Fnat** | **> 0.5** | Is it stacked? Native scores 0.0009, i.e. not at all |
-| **amyloid** (max) | **>= ~0.99** | **Plausibility check.** The target is an amyloid fibril; a hit whose amyloidogenic core has been mutated away is suspect even if AF2 likes it |
-| **amyloid** (mean) | **>= ~0.23** | Keep it at or above the real filament sequence; there is no reason to push it toward 1.0 (see below) |
-| **LLPS** | **<= ~0.50** | Droplets are the competing fate of tau. Lower than native steers toward the fibril -- a hypothesis you choose to encode, not an established correction |
-| **AGGRESCAN** | **>= ~-13.5** (`na4vss`) | Second opinion on the amyloid score, from a completely different method. Read it relative to native, never as an absolute |
-| **mpnn** | **<= ~0.59** | Is the sequence at least as plausible for this backbone as native? Native scores 0.588; a scrambled or homopolymer sequence runs 0.73-1.25 (see below). Read differences below ~0.01 as noise |
-| **ddG** | **<= 0** | Does the design hold the reference fold together at least as well as native? Native is 0 by definition, so any positive value is a design that ThermoMPNN thinks destabilizes the filament |
+The columns above give the target for each metric. What they mean for *this*
+goal, where they differ:
 
-**Where you start.** The same metrics, measured here on the native PHF tau
-sequence itself (5O3L, 73 residues) -- the sequence that does form the target
-filament in reality:
+* **RMSD and TM-score are the success criteria** -- the only metrics that
+  directly answer "is this the PHF fold?". TM-score is the more interpretable of
+  the two, because 0.5 is a threshold rather than a number.
+* **pLDDT and ipTM are necessary companions, not criteria.** A low RMSD with
+  pLDDT ~0.3 means AF2 is not actually asserting that fold. ipTM is the more
+  telling of the two for a fibril.
+* **amyloid, AGGRESCAN and ddG are plausibility checks.** The target is an
+  amyloid fibril, so a hit whose amyloidogenic core has been mutated away is
+  suspect even if AF2 likes it. Read AGGRESCAN relative to native, never as an
+  absolute.
+* **LLPS is a hypothesis you choose to encode**, not an established correction:
+  droplets are the competing fate of tau, so steering below native is a modeling
+  decision.
 
-| Metric | Native PHF tau | Reading |
-|--------|---------------|---------|
-| pLDDT | 0.23 | AF2 has no confidence in *any* fold for this sequence |
-| RMSD | 35 A | the predicted shape is nothing like the real filament |
-| pTM | 0.133 | nor in the assembly as a whole |
-| TM-score | 0.102 | and the shape really is not there, independent of AF2's opinion |
-| lDDT | 0.127 | likewise, without any superposition |
-| Fnat | 0.0009 | essentially no native inter-chain contact is recovered |
-| **ipTM** | **0.093** | and least of all in the interface -- lower than pLDDT, i.e. the stacking that makes it a fibril is exactly what AF2 misses |
-| iPAE | 27.8 A | against a ~10 A threshold for a credible interface |
-| amyloid (mean) | 0.23 | most of the sequence is not amyloidogenic on its own |
-| amyloid (max) | 0.996 | but it holds an almost maximally amyloidogenic window (VQIVYK, residues 1-6) |
-| LLPS | 0.50 | right on the boundary; tau is known to do both |
-| AGGRESCAN `na4vss` | -13.50 | one solid hot spot at residues 1-6 (VQIVYK), plus one that is an artifact -- see below |
-| ProteinMPNN `mpnn_score` | 0.588 | for scale: poly-alanine 0.733, the native sequence reversed 0.949, poly-tryptophan 1.246 |
+**Where you start.** The native column is measured on the PHF tau sequence
+itself (5O3L, 73 residues) -- the sequence that does form the target filament in
+reality.
+
+Read down the **Native PHF tau** column and the shape of the problem appears.
+AF2 has no confidence in any fold for this sequence, and **least of all in the
+interface** -- ipTM comes out below pLDDT, meaning the stacking that makes it a
+fibril is exactly what it misses. The reference-based metrics agree
+independently of AF2's opinion: the fold is not there and essentially no native
+inter-chain contact is recovered. Meanwhile the sequence itself does hold an
+almost maximally amyloidogenic window, VQIVYK at residues 1-6, which is what
+makes the failure a structural one rather than a sequence one.
 
 Two things to read carefully in that last row.
 
@@ -237,9 +221,10 @@ uv sync --extra cuda   # GPU (for real runs)
 # 2. Download AlphaFold2 model parameters (~3.5 GB)
 bash download_params.sh
 
-# 3. Prepare reference target structure(s)
-uv run python prepare_reference.py                          # PHF tau (default: 5O3L chains A,C,E,G,I)
-uv run python prepare_reference.py --pdb-id 6ELM --chains A # WNK2 CCT1 monomer
+# 3. Prepare reference target structure(s). Every option spelled out, so the
+#    command says what it targets instead of relying on the defaults.
+uv run python prepare_reference.py --pdb-id 5O3L --chains A,C,E,G,I   # PHF tau
+uv run python prepare_reference.py --pdb-id 6ELM --chains A           # WNK2 CCT1 monomer
 ```
 
 One `uv sync` installs everything needed for both the structural and the
@@ -253,6 +238,11 @@ torch cache the first time you run with `--esm-scores on`. The small classifier
 heads that turn ESM2 embeddings into the amyloid and LLPS scores ship with the
 repository in `models/esm_heads/`.
 
+`--pdb-id 5O3L --chains A,C,E,G,I` is what you get by passing nothing, but
+writing it out means the command records which target it built -- worth doing in
+a script or a lab notebook, where a bare `prepare_reference.py` a year later
+does not say what it produced.
+
 After setup, you should have:
 - `params/` -- AF2 model weights
 - `data/5o3l_acegi_ca_coords.npy` -- PHF target coordinates, shape (5, 73, 3)
@@ -263,8 +253,8 @@ After setup, you should have:
 ## Quick Start
 
 ```bash
-# PHF tau 5-chain homooligomer (default)
-uv run python run_search.py --n-steps 100
+# PHF tau 5-chain homooligomer (the default target, written out)
+uv run python run_search.py --pdb-id 5O3L --chains A,C,E,G,I --n-steps 100
 
 # WNK2 CCT1 monomer
 uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
@@ -283,6 +273,7 @@ Target selection:
 --chains IDS         Comma-separated chain IDs (default: A,C,E,G,I)
 
 Overrides:
+--data-dir DIR       AF2 parameters directory (default: params)
 --ref-coords FILE    Reference CA coordinates .npy (auto-derived from --pdb-id/--chains)
 --initial-seq SEQ    Starting sequence (auto-loaded from prepared reference)
 
@@ -295,7 +286,7 @@ Search parameters:
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
 --w-ptm W            Weight for pTM (default: 0.0)
 --w-iptm W           Weight for interface pTM; higher is better (default: 0.0)
---w-tm W             Weight for TM-score; higher is better (default: 0.0)
+--w-tm-score W             Weight for TM-score; higher is better (default: 0.0)
 --w-lddt W           Weight for lDDT; higher is better (default: 0.0)
 --w-fnat W           Weight for Fnat; higher is better (default: 0.0)
 --w-ipae W           Weight for interface PAE; LOWER is better, so use a
@@ -322,7 +313,17 @@ Output:
 --output FILE        Output JSON path (default: results.json)
 ```
 
-## Sequence-level scores (amyloid, LLPS, AGGRESCAN)
+## How each metric is computed
+
+What the metrics *mean* is above. This section is the provenance, the cost and
+the caveats -- what you need in order to trust or cite a number, not to read
+one.
+
+TANGO and WALTZ, which this literature usually reports, are deliberately absent:
+TANGO ships as a licensed compiled binary and WALTZ is web-server only, with a
+score that depends on a licensed FoldX matrix. AGGRESCAN stands in for TANGO's
+role and the `6aa` amyloid head for WALTZ's. **Neither reproduces the original
+numbers, so results here are not comparable to published TANGO or WALTZ values.**
 
 ### AGGRESCAN
 
@@ -330,10 +331,10 @@ Output:
 ([Conchillo-Sole et al. 2007](https://doi.org/10.1186/1471-2105-8-65)), whose
 per-residue scale was measured *in vivo* from the intracellular aggregation of
 amyloid-beta central-hydrophobic-cluster mutants
-([Sanchez de Groot et al. 2005](https://doi.org/10.1186/1472-6807-5-18)). Each
-residue carries a propensity value (a3v), a length-dependent sliding window
-averages them into a profile (a4v), and a run of 5 or more residues above the
-threshold `HST = -0.02` containing no proline is a hot spot.
+([Sanchez de Groot et al. 2005](https://doi.org/10.1186/1472-6807-5-18)). The
+scale is its a3v values, the window length follows the sequence length, and
+`HST = -0.02` with a 5-residue minimum and no proline defines a hot spot -- all
+taken from the paper and its additional files.
 
 It costs **~80 microseconds** per candidate -- against ~10 s for AF2 -- so it is
 always computed and always recorded, with no flag to switch it on. Each record
@@ -418,7 +419,7 @@ five times stronger.
 
 The inverse-folding model's own opinion of a sequence: the mean negative log
 probability it assigns, given the target coordinates. **Lower is better**, so
-`--w-mpnn` must be **negative** to reward sequences ProteinMPNN likes.
+`--w-mpnn-score` must be **negative** to reward sequences ProteinMPNN likes.
 
 It answers a genuinely different question from the rest. RMSD asks whether AF2
 folds the sequence onto the target; the amyloid indices ask whether the sequence
@@ -428,7 +429,7 @@ generated under in the first place.
 
 ```bash
 uv run python run_search.py --n-steps 100 --mpnn-scores on          # record only
-uv run python run_search.py --n-steps 100 --w-mpnn -1.0             # negative weight!
+uv run python run_search.py --n-steps 100 --w-mpnn-score -1.0             # negative weight!
 ```
 
 This comes from the ProteinMPNN bundled inside ColabDesign, using the
@@ -472,38 +473,9 @@ Also recorded is `mpnn_identity`, the fraction of positions still matching the
 reference sequence -- a plain drift counter. ColabDesign's own `seqid` output is
 not used: it compares the scored sequence against itself and is always 1.0.
 
-### Why not TANGO and WALTZ?
-
-The amyloid design literature -- including
-[Gadhe et al. 2026](https://doi.org/10.64898/2026.05.08.723915), who did exactly
-this kind of ProteinMPNN design on alpha-synuclein fibrils -- characterizes
-designs with TANGO and WALTZ. Neither can be bundled here:
-
-- **TANGO** is distributed as a compiled binary under a licence agreement
-  ("we do not provide or sell source code"). Free for academic use, but it has
-  to be requested, and it cannot ship with this repository.
-- **WALTZ** is web-server only. Its score combines a PSSM, 19 physicochemical
-  properties and a structural pseudo-energy matrix derived with FoldX, which is
-  itself licensed, so a faithful local reimplementation is not realistic either.
-
-What fills their roles here, and how honestly:
-
-| Their tool | Measures | Stand-in here | Caveat |
-|-----------|----------|---------------|--------|
-| TANGO | generic hydrophobic beta-sheet aggregation | **AGGRESCAN** (`aggrescan.py`) | different method and scale; same question |
-| WALTZ | sequence-specific amyloid motifs | **the `6aa` amyloid head** (already in `models/esm_heads/`) | trained on the WALTZ hexapeptide benchmark, so it learned from WALTZ's data -- but it is a language-model classifier, **not** WALTZ |
-
-Neither substitution reproduces the original numbers, so results here are not
-directly comparable to published TANGO or WALTZ values. If you need the real
-ones, the web servers ([tango.crg.es](https://tango.crg.es/),
-[waltz.switchlab.org](https://waltz.switchlab.org/)) take a sequence or a FASTA
-and are fine for a handful of selected designs -- which is how Gadhe et al. used
-them, as post-hoc characterization of already-generated sequences rather than
-inside the design loop.
-
 ### amyloid and LLPS
 
-How the two language-model scores are computed. Both come from
+Both come from
 [Lobo et al. (2026)](https://doi.org/10.1073/pnas.2531932123) and work the same
 way: embed a peptide with ESM2-3B (layer 36, mean-pooled over residues), then
 push the 2560-dim vector through a logistic regression trained on experimental
@@ -559,6 +531,24 @@ one means repeating every ESM evaluation.
 [`models/esm_heads/README.md`](models/esm_heads/README.md). If you publish
 numbers that use them, cite Lobo et al., *PNAS* **123**, e2531932123 (2026).
 
+### Which metrics are present when
+
+Whether a key exists in `results.json` depends on the target and the flags, so
+analysis code needs to handle absence. The complete set of conditions:
+
+| metric | present when |
+|--------|--------------|
+| pLDDT, RMSD, pTM, TM-score, lDDT, AGGRESCAN (and the `*_chain` variants) | always |
+| ipTM, iPAE, Fnat | the target has more than one chain |
+| ddG | a matrix exists in `models/ddg/` for the target |
+| ProteinMPNN | `--mpnn-scores on`, or `--w-mpnn-score` is nonzero |
+| amyloid, LLPS | `--esm-scores on`, or `--w-amyloid`/`--w-llps` is nonzero |
+
+A metric that does not apply is **absent**, never a placeholder: a monomer has
+no `fnat` key rather than `fnat = nan`. `n_native_contacts`, the denominator of
+Fnat, is a property of the target and appears once at the top level rather than
+in every record.
+
 ## Architecture Overview
 
 ```
@@ -570,9 +560,13 @@ mc_search.py           Search strategy (THE PART YOU REPLACE)
     v
 evaluate.py            SequenceEvaluator: sequence -> every metric + fitness
     |
-    +-> predict.py     AF2 black-box evaluator (AF2Predictor, DO NOT MODIFY)
+    +-> predict.py     AF2 black-box evaluator (AF2Predictor)
     +-> utils.py       RMSD computation + mutation operator
     +-> esm_scores.py  ESM2-3B amyloid / LLPS scores
+    +-> shape.py       TM-score / lDDT / Fnat against the reference
+    +-> aggrescan.py   AGGRESCAN aggregation propensity
+    +-> ddg.py         ThermoMPNN stability, from a precomputed matrix
+    +-> mpnn_score.py  ProteinMPNN inverse-folding score
     +-> fitness.py     Objective function
 
 prepare_reference.py   Extract reference from any PDB
@@ -613,11 +607,19 @@ To implement a genetic algorithm, you would:
 
 Currently a weighted sum:
 
-```python
-fitness = w_plddt * plddt - w_rmsd * rmsd + w_amyloid * amyloid + w_llps * llps
-```
+`compute_fitness` is a weighted sum over every metric in
+[What the metrics mean](#what-the-metrics-mean) -- thirteen weights, all of them
+0 by default except `w_plddt` and `w_rmsd`. Rather than repeat the formula here
+(where it went stale four times), the rule is:
 
-You can add nonlinear terms, thresholds, or additional objectives here without changing anything else. A metric passed as `None` is dropped from the sum, which is how the sequence terms disappear when they are switched off.
+* every weight flag is `--w-` plus its record key with `_` replaced by `-`, so
+  `tm_score` is driven by `--w-tm-score`
+* a metric passed as `None`, or one whose weight is 0, is **skipped** rather
+  than multiplied by zero -- so a metric that is merely being reported cannot
+  affect the fitness even if it came back non-finite
+
+Add nonlinear terms, thresholds or additional objectives here without touching
+anything else.
 
 ### 3. Change the mutation operator -- `utils.py`
 
@@ -627,29 +629,45 @@ You can add nonlinear terms, thresholds, or additional objectives here without c
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"  # 20 letters
 ```
 
-### 4. The evaluator (you probably don't need to touch this) -- `predict.py`
+### 4. The AF2 wrapper -- `predict.py`
+
+Treat this as a black box for optimization purposes: it is `f(sequence) -> scores
+and coordinates`, and the search's job is to explore sequence space, not to
+change the evaluator. But it is not off-limits. AF2 populates far more in
+`model.aux` than this returns -- contact maps (`cmap`, `i_cmap`), the full PAE
+matrix, per-residue confidences -- and pulling another one out is a two-line
+change. `ptm`/`iptm`/`ipae` were added exactly that way; they had been computed
+and discarded since the first commit.
+
 
 `AF2Predictor.predict(sequence)` wraps AlphaFold2 via ColabDesign. It takes a sequence string and returns:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `plddt` | float (0-1) | Mean prediction confidence |
+| `ptm` | float (0-1) | Predicted TM-score of the assembly |
+| `iptm` | float (0-1) | Interface pTM -- **only when `copies > 1`** |
+| `ipae` | float (0-1) | Interface PAE, divided by 31 A -- **only when `copies > 1`** |
+| `ipae_angstrom` | float | The same in angstroms -- **only when `copies > 1`** |
 | `ca_coords` | ndarray (copies, length, 3) | Predicted 3D coordinates |
+| `plddt_per_residue` | ndarray (length,) | Per-residue confidence |
 | `pdb_str` | str | Full atomic structure in PDB format |
 
 Think of this as `f(x) -> score` where `x` is an *L*-dimensional categorical variable. Each call takes a few seconds on GPU.
 
 ### 5. Add a new target
 
-```bash
-# 1. Prepare reference structure
-uv run python prepare_reference.py --pdb-id <PDB_ID> --chains <CHAIN_IDS>
+The two commands are in [Setup](#setup) and [Quick Start](#quick-start); the
+pipeline derives sequence length, chain count and initial sequence from the
+prepared reference files, so nothing else needs changing.
 
-# 2. Run search
-uv run python run_search.py --pdb-id <PDB_ID> --chains <CHAIN_IDS> --n-steps 100
-```
+Two things a new target does not get for free:
 
-The pipeline auto-derives sequence length, chain count, and initial sequence from the prepared reference files.
+* **ddG** needs its own matrix. Without one the term is simply absent, which is
+  why `--w-ddg` errors rather than silently doing nothing -- run
+  `precompute_ddg.py` for the target, or leave the weight at 0.
+* **Interface metrics** (ipTM, iPAE, Fnat) exist only if the target has more
+  than one chain.
 
 ## Output
 

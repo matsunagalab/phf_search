@@ -5,8 +5,8 @@ def compute_fitness(
     w_rmsd: float = 1.0,
     *,
     ptm: float | None = None,
-    i_ptm: float | None = None,
-    i_pae: float | None = None,
+    iptm: float | None = None,
+    ipae: float | None = None,
     tm_score: float | None = None,
     lddt: float | None = None,
     fnat: float | None = None,
@@ -37,9 +37,9 @@ def compute_fitness(
         plddt: AF2 confidence in [0, 1], higher = more confident
         rmsd: deviation from the reference structure in angstroms, lower = closer
         ptm: predicted TM-score of the assembly in [0, 1], higher = better
-        i_ptm: the same over inter-chain pairs -- the interface confidence,
+        iptm: the same over inter-chain pairs -- the interface confidence,
             which for a fibril is what its defining contacts rest on
-        i_pae: mean inter-chain predicted aligned error, normalized by 31 A, so
+        ipae: mean inter-chain predicted aligned error, normalized by 31 A, so
             in [0, 1] and **lower is better** -- a search that wants a confident
             interface needs a negative `w_ipae`
 
@@ -82,10 +82,10 @@ def compute_fitness(
     fitness = w_plddt * plddt - w_rmsd * rmsd
     if ptm is not None and w_ptm != 0.0:
         fitness += w_ptm * ptm
-    if i_ptm is not None and w_iptm != 0.0:
-        fitness += w_iptm * i_ptm
-    if i_pae is not None and w_ipae != 0.0:
-        fitness += w_ipae * i_pae
+    if iptm is not None and w_iptm != 0.0:
+        fitness += w_iptm * iptm
+    if ipae is not None and w_ipae != 0.0:
+        fitness += w_ipae * ipae
     if tm_score is not None and w_tm != 0.0:
         fitness += w_tm * tm_score
     if lddt is not None and w_lddt != 0.0:

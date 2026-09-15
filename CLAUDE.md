@@ -29,8 +29,8 @@ pyproject.toml       - Project definition (managed by uv)
 ```bash
 uv sync --extra cuda                # Everything, including torch + fair-esm (CPU: --extra cpu)
 bash download_params.sh             # AF2 parameters -> params/
-uv run python prepare_reference.py  # Default: 5O3L chains A,C,E,G,I -> data/5o3l_acegi_*
-uv run python prepare_reference.py --pdb-id 6ELM --chains A  # -> data/6elm_a_*
+uv run python prepare_reference.py --pdb-id 5O3L --chains A,C,E,G,I  # -> data/5o3l_acegi_*
+uv run python prepare_reference.py --pdb-id 6ELM --chains A          # -> data/6elm_a_*
 ```
 
 ESM2-3B (~5.7 GB) downloads itself into the torch hub cache on first use of the
@@ -39,8 +39,8 @@ sequence scores; the classifier heads are already in `models/esm_heads/`.
 ## Usage
 
 ```bash
-# PHF tau (default)
-uv run python run_search.py --n-steps 100
+# PHF tau (the default target, written out)
+uv run python run_search.py --pdb-id 5O3L --chains A,C,E,G,I --n-steps 100
 
 # WNK2 CCT1 monomer
 uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
@@ -63,13 +63,13 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 | `--w-rmsd` | 1.0 | RMSD weight |
 | `--w-ptm` | 0.0 | pTM weight |
 | `--w-iptm` | 0.0 | Interface pTM weight; higher is better |
-| `--w-tm` | 0.0 | TM-score weight; higher is better |
+| `--w-tm-score` | 0.0 | TM-score weight; higher is better |
 | `--w-lddt` | 0.0 | lDDT weight; higher is better |
 | `--w-fnat` | 0.0 | Fnat weight; higher is better |
 | `--w-ipae` | 0.0 | Interface PAE weight; LOWER is better, so the weight should be NEGATIVE |
 | `--w-aggrescan` | 0.0 | AGGRESCAN weight; negative penalizes |
-| `--mpnn-scores` | `auto` | `auto` (on when `--w-mpnn` is nonzero) / `on` / `off` |
-| `--w-mpnn` | 0.0 | ProteinMPNN weight. Score is a negative log probability, so LOWER is better and the weight should be NEGATIVE |
+| `--mpnn-scores` | `auto` | `auto` (on when `--w-mpnn-score` is nonzero) / `on` / `off` |
+| `--w-mpnn-score` | 0.0 | ProteinMPNN weight. Score is a negative log probability, so LOWER is better and the weight should be NEGATIVE |
 | `--mpnn-n-eval` | 10 | Decoding orders averaged; the score is stochastic |
 | `--w-ddg` | 0.0 | ThermoMPNN ddG weight. Positive ddG = destabilizing, so use a NEGATIVE weight for stable designs |
 | `--ddg-chain-reduction` | `mean` | Combine chain copies: `mean` / `middle` / `sum` |
@@ -98,8 +98,10 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 - **Structure comparison**: Kabsch RMSD over all n_chains! chain permutations, taking the minimum (trivial for monomers)
 - **Fitness**: a weighted sum over every metric below, `w_plddt * pLDDT - w_rmsd * RMSD` by default with all other weights 0 (higher is better; a metric passed as `None` drops out of the sum). Everything past `w_rmsd` in `compute_fitness` is keyword-only: each added metric used to shift the positional arguments of the ones after it, silently reassigning a caller's weights
 - **Multimer confidences**: `ptm`, `i_ptm` and `i_pae` come out of the same AF2 forward pass as pLDDT and were previously discarded by `predict.py`, so recording them costs nothing. For a fibril `i_ptm` is the more meaningful confidence -- the structure *is* its inter-chain stacking -- and native PHF tau scores `i_ptm` 0.093 against pLDDT 0.235, i.e. AF2 misses the interface even harder than the fold. Bennett et al. 2023 found interface PAE the best in-silico filter for designed interfaces. **ColabDesign divides PAE by 31 A** (`af/loss.py`), so `i_pae` is in [0,1]; `i_pae_angstrom` is recorded for comparison against the literature's ~10 A thresholds (native: 27.8 A)
-- **Confidence vs fidelity**: pLDDT/pTM/ipTM/iPAE are AF2's opinion of itself and need no reference, so they can be high for a confidently wrong shape. `shape.py` adds the reference-based half -- TM-score (iterative superposition search, so the >0.5 same-fold threshold applies), lDDT (superposition-free, and the quantity pLDDT predicts), Fnat (fraction of the reference's inter-chain CA contacts recovered), plus per-chain variants. ~385 ms/candidate, pure numpy on coordinates already in hand
+- **Confidence vs fidelity**: pLDDT/pTM/ipTM/iPAE are AF2's opinion of itself and need no reference, so they can be high for a confidently wrong shape. `shape.py` adds the reference-based half -- TM-score (iterative superposition search, so the >0.5 same-fold threshold applies), lDDT (superposition-free, and the quantity pLDDT predicts), Fnat (fraction of the reference's inter-chain CA contacts recovered), plus per-chain variants. pure numpy on coordinates already in hand. Cost is not constant -- the TM-score refinement iterates more as structures converge, so it is ~250 ms at the current starting point (TM 0.10), ~530 ms at TM 0.58, ~150 ms on native itself: succeeding makes it more expensive
 - **Why the decomposition earns its cost**: on native PHF tau, global RMSD 34.97 A says only "not similar", while per-chain RMSD 20 A / per-chain lDDT 0.443 / global lDDT 0.127 / Fnat 0.0009 localize it -- the monomer C-shape is wrong *and* there is no stacking. The 6ELM monomer reaches TM-score 0.648 through the same pipeline, so the PHF failure is target-specific, not a general AF2 failure
+- **Metric presence**: a metric that does not apply is absent, not a placeholder. ipTM/iPAE/Fnat only exist for `copies > 1`; ddG only when `models/ddg/` has a matrix for the target; ProteinMPNN and amyloid/LLPS behind their `auto/on/off` flags. `results.json` records non-finite floats as `null` (`_convert` in run_search.py) because `json.dump` would emit a bare `NaN` that strict parsers reject
+- **Naming rule**: every weight flag is `--w-` plus its record key with `_` replaced by `-` (`tm_score` -> `--w-tm-score`). `predict.py` renames ColabDesign's `i_ptm`/`i_pae` to `iptm`/`ipae` to keep that rule total
 - **Fnat is not DockQ**: DockQ defines Fnat over all heavy atoms at 5 A, which is not comparable between sequences with different side chains. Here it is CA pairs at 8 A. Do not report these as DockQ values
 - **Interface metrics need an interface**: `i_ptm`/`i_pae`/`i_pae_angstrom` are emitted only for `copies > 1` (ColabDesign adds `i_pae` to the losses only then, and pops `i_ptm` from its own log for a single chain because it returns a meaningless 0.0), and `fnat` is `nan` for one chain
 - **Weight 0 skips the term rather than multiplying by zero**: `0.0 * nan` is `nan`, which combined with the non-finite-fitness guard would abort a run over a metric nobody asked to optimize
@@ -115,7 +117,7 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 - **ddG gaps are fatal, loudly**: `precompute_ddg.py` leaves NaN where the structure does not model a residue, and a NaN fitness makes both branches of the Metropolis criterion false -- every candidate rejected, run reports success, nothing searched. `ddg.py` therefore raises on a NaN lookup, `precompute_ddg.py` warns with a NaN count, and `SequenceEvaluator` refuses any non-finite fitness whatever produced it. The shipped 5O3L matrix has 0 NaN of 7300; 6GX5 (275-305 unobserved) is the kind of target that would trip it
 - **ddG chain reductions**: `mean` (default) and `middle` are interchangeable here (correlation 0.98), but `sum` multiplies the term by the chain count -- 8.08 vs 1.62 for I3D on the 5-chain target -- so a weight tuned under one is wrong under the other. `middle` takes index `n//2`, which for an even chain count is the upper of the two central chains
 - **ddG limits**: a k-mutation candidate is the sum of k single-mutant predictions (no epistasis, error grows with k); ThermoMPNN was trained on Megascale globular domains, so a fibril core is out of distribution; and every number is for a mutation of the reference backbone, not of the candidate's predicted structure. For an academic licence, FoldX or PyRosetta is the more defensible physics-based route
-- **ProteinMPNN score**: `mean(-log p(residue | backbone))` from the ProteinMPNN bundled in ColabDesign (`v_48_020`), so no new dependency. Lower is better -> `--w-mpnn` must be NEGATIVE. Native scores 0.588 on the PHF reference; poly-alanine 0.733, native reversed 0.949, poly-tryptophan 1.246, so the usable span is ~0.6 (poly-alanine alone would suggest ~0.15 and underestimate it). Stochastic: SD 0.019 at n_eval=1, 0.006 at 10, ~18 ms per evaluation. Differences below ~0.01 are noise. The isolated 180 ms at n_eval=10 understates the in-run cost -- a full run went from ~11.9 s to ~13 s per step, untraced
+- **ProteinMPNN score**: `mean(-log p(residue | backbone))` from the ProteinMPNN bundled in ColabDesign (`v_48_020`), so no new dependency. Lower is better -> `--w-mpnn-score` must be NEGATIVE. Native scores 0.588 on the PHF reference; poly-alanine 0.733, native reversed 0.949, poly-tryptophan 1.246, so the usable span is ~0.6 (poly-alanine alone would suggest ~0.15 and underestimate it). Stochastic: SD 0.019 at n_eval=1, 0.006 at 10, ~18 ms per evaluation. Differences below ~0.01 are noise. The isolated 180 ms at n_eval=10 understates the in-run cost -- a full run went from ~11.9 s to ~13 s per step, untraced
 - **ProteinMPNN gotchas found by measurement**: (a) ColabDesign's score differs from the original PyTorch tool by 0.0084 on the same input, which is about 2x the standard error of the 30-order average being compared (~0.004) and therefore a resolvable systematic difference, not noise -- the 0.021 figure is the spread of a *single* evaluation and must not be used as the comparison scale; cause unidentified, and it is NOT the 20-vs-21 letter normalization; (b) ColabDesign orders residues as AlphaFold does (`ARNDCQEGHILKMFPSTWYV`), not as ProteinMPNN does, so decoding `_inputs["S"]` with the wrong table yields a wrong-but-plausible reference sequence; (c) `score()` overwrites `_inputs["S"]` in place because `copy_dict` shares leaf arrays, which is why its `seqid` is always 1.0 and why `MPNNScorer` snapshots the reference before the first call
 - **Homo-oligomers only**: ColabDesign's `_prep_hallucination` takes a scalar `length` and hardcodes `get_multi_id(..., homooligomer=True)`, so hetero-oligomers cannot be searched. Two metrics encode that assumption: `min_permutation_rmsd` permutes all n_chains! chains (valid only when they share a sequence), and `precompute_ddg.py` refuses chains that differ. Both are correct for homo and fail loudly rather than silently for hetero
 - **MC acceptance**: Metropolis criterion `exp(delta_fitness / temperature)`

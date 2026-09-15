@@ -151,7 +151,7 @@ class SequenceEvaluator:
         # Free: the same AF2 forward pass produced them. i_ptm and i_pae speak
         # to the inter-chain interface, which is what a fibril is made of, and
         # are absent for a single chain.
-        for key in ("ptm", "i_ptm", "i_pae", "i_pae_angstrom"):
+        for key in ("ptm", "iptm", "ipae", "ipae_angstrom"):
             if key in result:
                 record[key] = result[key]
 
@@ -210,8 +210,8 @@ class SequenceEvaluator:
             w_plddt=self.w_plddt,
             w_rmsd=self.w_rmsd,
             ptm=record.get("ptm"),
-            i_ptm=record.get("i_ptm"),
-            i_pae=record.get("i_pae"),
+            iptm=record.get("iptm"),
+            ipae=record.get("ipae"),
             tm_score=record.get("tm_score"),
             lddt=record.get("lddt"),
             fnat=record.get("fnat"),
@@ -240,8 +240,9 @@ class SequenceEvaluator:
                 f"non-finite fitness {record['fitness']} for {seq}; metrics: "
                 + ", ".join(
                     f"{k}={record[k]}"
-                    for k in ("plddt", "rmsd", "i_ptm", "i_pae", "aggrescan",
-                              "ddg", "mpnn_score")
+                    for k in ("plddt", "rmsd", "ptm", "iptm", "ipae",
+                              "tm_score", "lddt", "fnat", "aggrescan", "ddg",
+                              "mpnn_score")
                     if k in record
                 )
             )
@@ -254,15 +255,19 @@ class SequenceEvaluator:
         max-mode one.
         """
         parts = [f"pLDDT={record['plddt']:.4f}", f"RMSD={record['rmsd']:.2f}"]
-        if "i_ptm" in record:
-            parts.append(f"ipTM={record['i_ptm']:.3f}")
-        if "i_pae_angstrom" in record:
-            parts.append(f"ipae={record['i_pae_angstrom']:.1f}A")
+        if "iptm" in record:
+            parts.append(f"ipTM={record['iptm']:.3f}")
+        if "ipae_angstrom" in record:
+            parts.append(f"ipae={record['ipae_angstrom']:.1f}A")
+        # Each key is checked on its own: a metric that does not apply to the
+        # target is absent from the record, not present-and-nan, so testing one
+        # key and reading another is how this breaks.
         if "tm_score" in record:
             parts.append(f"TM={record['tm_score']:.3f}")
+        if "lddt" in record:
             parts.append(f"lDDT={record['lddt']:.3f}")
-            if not np.isnan(record["fnat"]):
-                parts.append(f"Fnat={record['fnat']:.3f}")
+        if "fnat" in record:
+            parts.append(f"Fnat={record['fnat']:.3f}")
         parts.append(f"aggrescan({self.aggrescan_metric})={record['aggrescan']:.3f}")
         if self.ddg_lookup is not None:
             parts.append(f"ddG={record['ddg']:+.2f}")

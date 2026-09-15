@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 
 import numpy as np
@@ -87,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "NEGATIVE weight to reward a confident interface",
     )
     parser.add_argument(
-        "--w-tm",
+        "--w-tm-score",
         type=float,
         default=0.0,
         help="TM-score weight in fitness. Shape fidelity against the "
@@ -146,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
         "auto = on when --w-mpnn is nonzero (default: auto)",
     )
     mpnn.add_argument(
-        "--w-mpnn",
+        "--w-mpnn-score",
         type=float,
         default=0.0,
         help="ProteinMPNN weight in fitness. The score is a negative log "
@@ -230,17 +231,17 @@ def esm_scores_enabled(args) -> bool:
 
 def mpnn_scores_enabled(args) -> bool:
     if args.mpnn_scores == "auto":
-        return args.w_mpnn != 0.0
+        return args.w_mpnn_score != 0.0
     return args.mpnn_scores == "on"
 
 
 def build_mpnn_scorer(parser, args, reference_pdb: str, chains: list[str]):
     """Construct the MPNNScorer, or None when the score is switched off."""
     if not mpnn_scores_enabled(args):
-        if args.w_mpnn != 0.0:
+        if args.w_mpnn_score != 0.0:
             parser.error(
                 "--mpnn-scores off leaves the ProteinMPNN term uncomputed, but "
-                "--w-mpnn is nonzero."
+                "--w-mpnn-score is nonzero."
             )
         return None
 
@@ -308,6 +309,8 @@ def main():
     # yourself to override.
     if scorer is not None and not args.esm_cpu:
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+    import shape
 
     from evaluate import SequenceEvaluator
     from mc_search import MonteCarloSearch
@@ -440,14 +443,14 @@ def main():
         w_ptm=args.w_ptm,
         w_iptm=args.w_iptm,
         w_ipae=args.w_ipae,
-        w_tm=args.w_tm,
+        w_tm=args.w_tm_score,
         w_lddt=args.w_lddt,
         w_fnat=args.w_fnat,
         w_amyloid=args.w_amyloid,
         w_llps=args.w_llps,
         w_aggrescan=args.w_aggrescan,
         w_ddg=args.w_ddg,
-        w_mpnn=args.w_mpnn,
+        w_mpnn=args.w_mpnn_score,
         scorer=scorer,
         ddg_lookup=ddg_lookup,
         mpnn_scorer=mpnn_scorer,
@@ -490,12 +493,20 @@ def main():
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, (np.floating, np.integer)):
-            return obj.item()
+            obj = obj.item()
+        # json.dump would emit a bare NaN/Infinity, which Python reads back but
+        # strict parsers (jsonlite, jq, most non-Python ones) reject. null is
+        # valid JSON and still says "no value".
+        if isinstance(obj, float) and not math.isfinite(obj):
+            return None
         return obj
 
     output = {
         "args": vars(args),
         "initial_seq": initial_seq,
+        # A property of the target, not of a candidate, so it is reported once
+        # instead of in every history record.
+        "n_native_contacts": shape.native_contact_count(ref_coords),
         "best_seq": summary["best_seq"],
         "best_fitness": summary["best_fitness"],
         "best_plddt": summary["best_plddt"],

@@ -42,17 +42,20 @@ class AF2Predictor:
                 plddt: mean pLDDT score (float, 0-1), higher is better
                 ptm: predicted TM-score over the whole assembly (0-1), higher
                     is better
-                i_ptm, i_pae, i_pae_angstrom: interface confidences, present
-                    **only when copies > 1**. i_ptm is pTM over inter-chain
-                    pairs (higher better); i_pae is the mean inter-chain
+                iptm, ipae, ipae_angstrom: interface confidences, present
+                    **only when copies > 1**. (ColabDesign spells these `i_ptm`
+                    and `i_pae`; they are renamed here so that every record key
+                    maps to its weight flag by replacing `_` with `-`.) iptm is
+                    pTM over inter-chain pairs (higher better); ipae is the mean
+                    inter-chain
                     predicted aligned error as ColabDesign reports it, divided
                     by 31 A so it lies in [0, 1] (lower better); and
-                    i_pae_angstrom is that multiplied back, verified equal to
+                    ipae_angstrom is that multiplied back, verified equal to
                     the mean of the inter-chain block of aux["pae"] (which is
                     in angstroms) to within 0.001 A.
 
                     Note these come from a non-multimer AF2 run with chains
-                    made by `copies` and a residue-index offset, so i_ptm is
+                    made by `copies` and a residue-index offset, so iptm is
                     ColabDesign's interface-masked quantity, not AF-Multimer's
                     official ipTM. Interface-PAE thresholds quoted in the
                     binder-design literature were measured with AF-Multimer and
@@ -97,9 +100,9 @@ class AF2Predictor:
         # both crashed the monomer target and bypassed that guard.
         if self.copies > 1:
             i_pae = float(np.array(self.model.aux["log"]["i_pae"]))
-            result["i_ptm"] = float(np.array(self.model.aux["i_ptm"]))
-            result["i_pae"] = i_pae
-            result["i_pae_angstrom"] = i_pae * PAE_SCALE_ANGSTROM
+            result["iptm"] = float(np.array(self.model.aux["i_ptm"]))
+            result["ipae"] = i_pae
+            result["ipae_angstrom"] = i_pae * PAE_SCALE_ANGSTROM
 
         return result
 

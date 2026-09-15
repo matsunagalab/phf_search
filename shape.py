@@ -62,12 +62,6 @@ def _kabsch_rotation(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
     return vt.T @ np.diag([1.0, 1.0, d]) @ u.T
 
 
-def _superimposed_deviations(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Per-residue distances after optimally superimposing a subset."""
-    rotation = _kabsch_rotation(mobile - mobile.mean(0), target - target.mean(0))
-    return np.linalg.norm((mobile - mobile.mean(0)) @ rotation.T - (target - target.mean(0)), axis=1)
-
-
 def tm_score(pred: np.ndarray, ref: np.ndarray) -> float:
     """TM-score for a 1:1 correspondence, length-normalized, in [0, 1].
 
@@ -93,7 +87,6 @@ def tm_score(pred: np.ndarray, ref: np.ndarray) -> float:
         for start in range(0, n_res - seed_length + 1, max(seed_length // 2, 1)):
             selected = np.arange(start, start + seed_length)
             for _ in range(20):
-                deviations = _superimposed_deviations(pred[selected], ref[selected])
                 if len(selected) < 3:
                     break
                 # Score the whole chain under this superposition.
@@ -129,19 +122,23 @@ def lddt(pred: np.ndarray, ref: np.ndarray) -> float:
     return float(np.mean([(error < t).mean() for t in LDDT_THRESHOLDS]))
 
 
-def fnat(pred: np.ndarray, ref: np.ndarray) -> tuple[float, int]:
+def fnat(pred: np.ndarray, ref: np.ndarray) -> tuple[float, int] | None:
     """Fraction of the reference's inter-chain CA contacts that are recovered.
 
     Args:
         pred, ref: coordinates shaped (n_chains, n_residues, 3)
 
     Returns:
-        (fnat, number of native inter-chain contacts). With one chain there is
-        no interface, and this returns (nan, 0) rather than a misleading 0.
+        (fnat, number of native inter-chain contacts), or None when there is no
+        interface to score. Returning None rather than nan keeps the metric
+        *absent* for a monomer, the way i_ptm and i_pae are: a nan would travel
+        into the fitness, into results.json as a bare `NaN` that strict JSON
+        parsers reject, and into plots as a gap that looks like a failure
+        rather than an inapplicable question.
     """
     n_chains, n_res = ref.shape[0], ref.shape[1]
     if n_chains < 2:
-        return float("nan"), 0
+        return None
 
     chain_of = np.repeat(np.arange(n_chains), n_res)
     inter_chain = chain_of[:, None] != chain_of[None, :]
@@ -153,7 +150,7 @@ def fnat(pred: np.ndarray, ref: np.ndarray) -> tuple[float, int]:
     ) & inter_chain
     n_native = int(native.sum())
     if n_native == 0:
-        return float("nan"), 0
+        return None
 
     recovered = (
         np.linalg.norm(flat_pred[:, None] - flat_pred[None, :], axis=-1) < CONTACT_CUTOFF
@@ -168,9 +165,10 @@ def compare(pred: np.ndarray, ref: np.ndarray) -> dict:
         pred, ref: coordinates shaped (n_chains, n_residues, 3)
 
     Returns:
-        dict with `tm_score` / `lddt` / `rmsd` for the assembly as a whole,
-        the same three per chain (`*_chain`, the best single chain against one
-        reference chain), and `fnat` with `n_native_contacts`.
+        dict with `tm_score` and `lddt` for the assembly as a whole, the same
+        two plus `rmsd_chain` for the best single chain against one reference
+        chain, and `fnat` -- which is **omitted entirely** when there is only
+        one chain and therefore no interface.
 
         The per-chain values answer "is the monomer fold right"; the global ones
         answer "is the assembly right". They come apart, and the gap is the
@@ -195,13 +193,27 @@ def compare(pred: np.ndarray, ref: np.ndarray) -> dict:
     ]
     best_tm, best_lddt, best_rmsd = max(chain_scores, key=lambda s: s[0])
 
-    contacts, n_native = fnat(pred, ref)
-    return {
+    metrics = {
         "tm_score": tm_score(flat_pred, flat_ref),
         "lddt": lddt(flat_pred, flat_ref),
         "tm_score_chain": best_tm,
         "lddt_chain": best_lddt,
         "rmsd_chain": best_rmsd,
-        "fnat": contacts,
-        "n_native_contacts": n_native,
     }
+    # Absent, not nan, when there is no interface. `n_native_contacts` depends
+    # only on the reference, so it is a property of the run and is reported by
+    # native_contact_count() instead of being repeated in every record.
+    interface = fnat(pred, ref)
+    if interface is not None:
+        metrics["fnat"] = interface[0]
+    return metrics
+
+
+def native_contact_count(ref: np.ndarray) -> int:
+    """How many inter-chain CA contacts the reference has -- the Fnat denominator.
+
+    A constant for a given target, so it belongs in a run summary rather than
+    in every history record.
+    """
+    interface = fnat(ref, ref)
+    return 0 if interface is None else interface[1]
