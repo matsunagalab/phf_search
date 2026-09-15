@@ -7,6 +7,8 @@ import os
 
 import numpy as np
 
+from aggrescan import METRICS as AGGRESCAN_METRICS
+
 # Default: PHF tau (5O3L) for backward compatibility
 DEFAULT_PDB_ID = "5O3L"
 DEFAULT_CHAINS = "A,C,E,G,I"
@@ -64,6 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--w-rmsd", type=float, default=1.0, help="RMSD weight in fitness"
+    )
+    parser.add_argument(
+        "--w-aggrescan",
+        type=float,
+        default=0.0,
+        help="AGGRESCAN weight in fitness; negative penalizes. Always computed "
+        "and recorded regardless (default: 0.0, report only)",
+    )
+    parser.add_argument(
+        "--aggrescan-metric",
+        choices=list(AGGRESCAN_METRICS),
+        default="na4vss",
+        help="Which AGGRESCAN scalar enters the fitness; all are recorded "
+        "(default: na4vss)",
     )
 
     # Sequence-level scores (amyloid-predict / LLPS-predict, Lobo et al. 2026)
@@ -227,6 +243,20 @@ def main():
                 f"{args.pdb_id} chains {args.chains}, or provide --initial-seq."
             )
 
+    # prepare_reference.py writes 'X' where a chain holds a non-standard
+    # residue, and neither the mutation operator nor AGGRESCAN can act on one.
+    # Caught here, before AF2 spends time loading its parameters.
+    from utils import AMINO_ACIDS
+
+    non_standard = sorted(set(initial_seq) - set(AMINO_ACIDS))
+    if non_standard:
+        parser.error(
+            f"initial sequence contains non-standard residue(s) {non_standard}, "
+            "which the pipeline cannot score. Edit the sequence file "
+            "(prepare_reference.py writes 'X' for modified residues) or pass a "
+            "cleaned --initial-seq."
+        )
+
     # Setup predictor
     logger.info(
         "Initializing AF2 predictor (length=%d, copies=%d, recycles=%d)",
@@ -248,11 +278,13 @@ def main():
         w_rmsd=args.w_rmsd,
         w_amyloid=args.w_amyloid,
         w_llps=args.w_llps,
+        w_aggrescan=args.w_aggrescan,
         scorer=scorer,
         amyloid_agg=args.amyloid_agg,
+        aggrescan_metric=args.aggrescan_metric,
     )
     logger.info(
-        "Fitness terms: pLDDT, RMSD%s",
+        "Fitness terms: pLDDT, RMSD, AGGRESCAN%s",
         ", amyloid, LLPS" if scorer is not None else "",
     )
 

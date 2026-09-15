@@ -11,14 +11,14 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 | Aspect | Details |
 |--------|---------|
 | **Search space** | Strings of length *L* over a 20-letter alphabet (amino acids) |
-| **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS` |
+| **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN` |
 | **Evaluation cost** | ~seconds per call on GPU (AlphaFold2 forward pass) |
 
 ## What the metrics mean
 
 No biology background needed. Two metrics come from the 3D structure AF2
-predicts for a candidate and are always computed; two are read off the sequence
-alone by a separate, much cheaper model.
+predicts for a candidate; three more are read off the sequence alone, far more
+cheaply, and say nothing about the predicted structure.
 
 | Metric | Range | Direction | What it asks |
 |--------|-------|-----------|--------------|
@@ -26,6 +26,7 @@ alone by a separate, much cheaper model.
 | **RMSD** | 0 to inf (angstroms) | lower | "How far is that predicted shape from the experimental target?" |
 | **amyloid** | 0 to 1 | higher | "Does this sequence read like one that forms amyloid fibrils?" |
 | **LLPS** | 0 to 1 | usually lower | "Does it read like one that condenses into liquid droplets instead?" |
+| **AGGRESCAN** | unbounded | higher | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
 
 **pLDDT** is the predictor's own confidence, averaged over residues. Above ~0.8
 AF2 is asserting a definite fold; below ~0.5 it is effectively saying "I don't
@@ -42,6 +43,15 @@ the decision boundary**: above 0.5 the sequence is on the "forms amyloid" /
 -- a sequence can land on the target coordinates in AF2's hands while reading
 nothing like a real amyloid former.
 
+**AGGRESCAN** answers roughly the same question as *amyloid*, but by a method
+old enough and simple enough to read in one sitting: each residue carries an
+experimentally measured propensity value, a sliding window averages them, and
+stretches that stay above a fixed threshold are called hot spots. It has **no
+decision boundary** -- the default summary (`na4vss`) is a sum, so only its
+relative ordering means anything. Keeping it alongside the language-model score
+is the point: when a transparent index and a learned one disagree about the same
+sequence, that disagreement is information about the indices.
+
 ### What counts as a good value
 
 The goal of this project is concrete: **find a sequence whose AF2 prediction is
@@ -55,6 +65,7 @@ serve that goal in different roles, so their target values are not symmetric.
 | **amyloid** (max) | **>= ~0.99** | **Plausibility check.** The target is an amyloid fibril; a hit whose amyloidogenic core has been mutated away is suspect even if AF2 likes it |
 | **amyloid** (mean) | **>= ~0.23** | Keep it at or above the real filament sequence; there is no reason to push it toward 1.0 (see below) |
 | **LLPS** | **<= ~0.50** | Droplets are the competing fate of tau. Lower than native steers toward the fibril -- a hypothesis you choose to encode, not an established correction |
+| **AGGRESCAN** | **>= ~-13.5** (`na4vss`) | Second opinion on the amyloid score, from a completely different method. Read it relative to native, never as an absolute |
 
 **Where you start.** The same metrics, measured here on the native PHF tau
 sequence itself (5O3L, 73 residues) -- the sequence that does form the target
@@ -67,6 +78,24 @@ filament in reality:
 | amyloid (mean) | 0.23 | most of the sequence is not amyloidogenic on its own |
 | amyloid (max) | 0.996 | but it holds an almost maximally amyloidogenic window (VQIVYK, residues 1-6) |
 | LLPS | 0.50 | right on the boundary; tau is known to do both |
+| AGGRESCAN `na4vss` | -13.50 | one solid hot spot at residues 1-6 (VQIVYK), plus one that is an artifact -- see below |
+
+Two things to read carefully in that last row.
+
+**The agreement is meaningful.** AGGRESCAN and the language-model amyloid score
+share no method, no training data and no decade, and they independently single
+out **VQIVYK** as the most aggregation-prone window of this construct. Where two
+such different indices agree, the signal is probably in the sequence rather than
+in the index.
+
+**The hot-spot count is not.** AGGRESCAN reports two hot spots here, but they
+are not comparable findings. VQIVYK clears the threshold by **0.50**; the second
+one, residues 9-13 (DLSKV), clears it by **0.0026** -- about 190 times less.
+Moving `HST` from -0.02 to -0.015 deletes it and turns `nhs` from 2 into 1. It
+is an artifact of where the threshold happens to fall, not a property of the
+sequence, which is why `nhs` is reported but not offered as an objective, and
+why `aggrescan.score()` returns a `margin` for every hot spot. Check that margin
+before believing a hot spot.
 
 Three consequences worth internalizing before tuning a search:
 
@@ -178,8 +207,10 @@ Search parameters:
 --num-recycles N     AF2 recycles (default: 3)
 --w-plddt W          Weight for pLDDT in fitness (default: 1.0)
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
+--w-aggrescan W      Weight for AGGRESCAN; negative penalizes (default: 0.0)
+--aggrescan-metric M na4vss | a3vsa | thsar (default: na4vss)
 
-Sequence-level scores:
+Sequence-level scores (language model; AGGRESCAN is always on):
 --esm-scores MODE    auto | on | off (default: auto = on if a weight is nonzero)
 --w-amyloid W        Weight for amyloidogenicity; negative penalizes (default: 0.0)
 --w-llps W           Weight for LLPS propensity; negative penalizes (default: 0.0)
@@ -195,9 +226,80 @@ Output:
 --output FILE        Output JSON path (default: results.json)
 ```
 
-## Sequence-level scores (amyloid and LLPS)
+## Sequence-level scores (amyloid, LLPS, AGGRESCAN)
 
-How the two sequence scores are computed. Both come from
+### AGGRESCAN
+
+`aggrescan.py` is a reimplementation of the published algorithm
+([Conchillo-Sole et al. 2007](https://doi.org/10.1186/1471-2105-8-65)), whose
+per-residue scale was measured *in vivo* from the intracellular aggregation of
+amyloid-beta central-hydrophobic-cluster mutants
+([Sanchez de Groot et al. 2005](https://doi.org/10.1186/1472-6807-5-18)). Each
+residue carries a propensity value (a3v), a length-dependent sliding window
+averages them into a profile (a4v), and a run of 5 or more residues above the
+threshold `HST = -0.02` containing no proline is a hot spot.
+
+It costs **~80 microseconds** per candidate -- against ~10 s for AF2 -- so it is
+always computed and always recorded, with no flag to switch it on. Each record
+carries `aggrescan_a3vsa`, `aggrescan_na4vss`, `aggrescan_nhs`,
+`aggrescan_nnhs`, `aggrescan_aatr`, `aggrescan_thsar` and `aggrescan_ta`. Of
+those, `--aggrescan-metric` can send `na4vss`, `a3vsa` or `thsar` to the
+fitness, weighted by `--w-aggrescan`. The per-residue profile and the
+per-hot-spot detail stay out of the records but are returned by
+`aggrescan.score()` for analysis, along with `a4vss`, `aat`, `thsa`, `a4vahs`
+and `nhsa` -- the unnormalized quantities are omitted from records only because
+they are the recorded ones times the (fixed) sequence length.
+
+**Mind the scale when weighting it.** Unlike the two probabilities, `na4vss` is
+a sum of order **-13**, so `--w-aggrescan 1.0` contributes about thirteen times
+what the entire pLDDT term can and roughly a third of the RMSD term. Chosen by
+analogy with `--w-amyloid 1.0`, it would quietly take over the objective.
+Start two orders of magnitude lower, around `0.01`-`0.05`.
+
+`nhs`/`nnhs` are recorded but cannot steer the search: over the 73-residue PHF
+target, counting hot spots takes only three distinct values across all 1387
+single mutants, so as an objective it is a step function whose steps are
+threshold noise.
+
+**This is not the official AGGRESCAN server.** The scale, window rule,
+threshold, hot-spot rule and area definitions all come from the paper and its
+additional files, but the server assigns the extreme terminal residues an
+unspecified value "to account for charge effects" that the publication does not
+give. Here those residues inherit the nearest window centre, so profiles can
+differ at the ends. Do not report these numbers as server output.
+
+### Why not TANGO and WALTZ?
+
+The amyloid design literature -- including
+[Gadhe et al. 2026](https://doi.org/10.64898/2026.05.08.723915), who did exactly
+this kind of ProteinMPNN design on alpha-synuclein fibrils -- characterizes
+designs with TANGO and WALTZ. Neither can be bundled here:
+
+- **TANGO** is distributed as a compiled binary under a licence agreement
+  ("we do not provide or sell source code"). Free for academic use, but it has
+  to be requested, and it cannot ship with this repository.
+- **WALTZ** is web-server only. Its score combines a PSSM, 19 physicochemical
+  properties and a structural pseudo-energy matrix derived with FoldX, which is
+  itself licensed, so a faithful local reimplementation is not realistic either.
+
+What fills their roles here, and how honestly:
+
+| Their tool | Measures | Stand-in here | Caveat |
+|-----------|----------|---------------|--------|
+| TANGO | generic hydrophobic beta-sheet aggregation | **AGGRESCAN** (`aggrescan.py`) | different method and scale; same question |
+| WALTZ | sequence-specific amyloid motifs | **the `6aa` amyloid head** (already in `models/esm_heads/`) | trained on the WALTZ hexapeptide benchmark, so it learned from WALTZ's data -- but it is a language-model classifier, **not** WALTZ |
+
+Neither substitution reproduces the original numbers, so results here are not
+directly comparable to published TANGO or WALTZ values. If you need the real
+ones, the web servers ([tango.crg.es](https://tango.crg.es/),
+[waltz.switchlab.org](https://waltz.switchlab.org/)) take a sequence or a FASTA
+and are fine for a handful of selected designs -- which is how Gadhe et al. used
+them, as post-hoc characterization of already-generated sequences rather than
+inside the design loop.
+
+### amyloid and LLPS
+
+How the two language-model scores are computed. Both come from
 [Lobo et al. (2026)](https://doi.org/10.1073/pnas.2531932123) and work the same
 way: embed a peptide with ESM2-3B (layer 36, mean-pooled over residues), then
 push the 2560-dim vector through a logistic regression trained on experimental
