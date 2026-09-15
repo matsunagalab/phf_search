@@ -688,3 +688,10 @@ Result JSON includes `ddg_artifact`, identifying the exact table bytes loaded by
 SHA-256 and carrying the table's provenance. Legacy tables remain readable and
 have `provenance: null`; their historical generation inputs are unknown and are
 not inferred from the current environment. With no table, `ddg_artifact` is null.
+
+Result JSON also includes `initial_metrics`, the complete scalar metric record
+from the initial evaluation, using the same JSON conversion as best/final
+metrics. It remains available when the initial state is neither best nor final,
+and for zero-step runs. `history` continues to start at step 1. Older result
+files lack this field; do not substitute their best/final metrics for the missing
+initial evaluation.

@@ -2,6 +2,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+
+from mc_search import MonteCarloSearch
 
 import numpy as np
 
@@ -29,6 +32,46 @@ class ArtifactTests(unittest.TestCase):
     def test_unknown_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(git_identity(directory), {"commit": None, "dirty": None})
+
+
+class FakeEvaluator:
+    predictor = None
+    ref_coords = None
+    w_plddt = 1.0
+    w_rmsd = 1.0
+
+    def __init__(self):
+        self.calls = 0
+
+    def evaluate(self, seq):
+        self.calls += 1
+        return dict(seq=seq, fitness=float(self.calls), plddt=0.5, rmsd=1.0,
+                    extra_metric=float(self.calls * 10), perm=(0,), pdb_str="dummy")
+
+    def format_metrics(self, record):
+        return "dummy"
+
+
+class InitialRecordTests(unittest.TestCase):
+    def test_initial_survives_new_best_and_final(self):
+        mc = MonteCarloSearch(initial_seq="A", evaluator=FakeEvaluator())
+        with patch("mc_search.mutate_sequence", return_value="C"):
+            result = mc.run(n_steps=1)
+        self.assertEqual(result["initial_metrics"]["extra_metric"], 10.0)
+        self.assertEqual(result["best_metrics"]["extra_metric"], 20.0)
+        self.assertEqual(result["final_metrics"]["extra_metric"], 20.0)
+        self.assertEqual([r["step"] for r in result["history"]], [1])
+        self.assertNotIn("pdb_str", result["initial_metrics"])
+        self.assertNotIn("perm", result["initial_metrics"])
+        self.assertEqual(json.loads(json.dumps(result))["initial_metrics"],
+                         result["initial_metrics"])
+
+    def test_zero_steps(self):
+        mc = MonteCarloSearch(initial_seq="A", evaluator=FakeEvaluator())
+        result = mc.run(n_steps=0)
+        self.assertEqual(result["history"], [])
+        self.assertEqual(result["initial_metrics"], result["best_metrics"])
+        self.assertEqual(result["initial_metrics"], result["final_metrics"])
 
 
 if __name__ == "__main__":

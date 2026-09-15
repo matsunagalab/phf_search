@@ -504,6 +504,7 @@ def main():
     output = {
         "args": vars(args),
         "initial_seq": initial_seq,
+        "initial_metrics": {k: _convert(v) for k, v in summary["initial_metrics"].items()},
         "ddg_artifact": ddg_lookup.artifact if ddg_lookup is not None else None,
         # A property of the target, not of a candidate, so it is reported once
         # instead of in every history record.

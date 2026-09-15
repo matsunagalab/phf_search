@@ -166,6 +166,7 @@ class MonteCarloSearch:
         # Initial evaluation
         logger.info("Evaluating initial sequence...")
         init_result = self._evaluate(self.current_seq)
+        initial_metrics = metrics_of(init_result)
         self._adopt(init_result)
         self._record_best(init_result)
 
@@ -189,6 +190,7 @@ class MonteCarloSearch:
                 )
 
         return {
+            "initial_metrics": initial_metrics,
             "best_seq": self.best_seq,
             "best_fitness": self.best_fitness,
             "best_plddt": self.best_plddt,
