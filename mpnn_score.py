@@ -11,9 +11,6 @@ fold. It says nothing about whether the sequence *folds* that way, only whether
 an inverse-folding model would have proposed it, so it is a different question
 from both RMSD and the amyloid indices.
 
-`identity` comes along as the fraction of positions still matching the
-reference sequence -- cheap, and useful for seeing how far a search has drifted.
-
 **The score is stochastic.** ProteinMPNN decodes in a random order and the score
 depends on that order, so `n_eval` orders are averaged. Measured on the 5-chain
 5O3L reference:
@@ -152,9 +149,13 @@ class MPNNScorer:
         """Score one sequence.
 
         Returns:
-            dict with `mpnn_score` (mean negative log probability over
-            `n_eval` decoding orders, lower is better) and `mpnn_identity`
-            (fraction of positions matching the reference sequence).
+            dict with `mpnn_score`: the mean negative log probability over
+            `n_eval` decoding orders, lower is better.
+
+            Sequence identity to the reference used to be returned here as
+            `mpnn_identity`, which named where it was computed rather than what
+            it was -- it needs no model at all. It lives in homology.py as
+            `seq_recovery` and is always computed.
         """
         cached = self._cache.get(sequence)
         if cached is not None:
@@ -172,11 +173,7 @@ class MPNNScorer:
         for _ in range(self.n_eval):
             total += float(model.score(seq=sequence)["score"])
 
-        matches = sum(a == b for a, b in zip(sequence, self.reference))
-        result = {
-            "mpnn_score": total / self.n_eval,
-            "mpnn_identity": matches / len(self.reference),
-        }
+        result = {"mpnn_score": total / self.n_eval}
 
         if self.cache_size > 0:
             self._cache[sequence] = result

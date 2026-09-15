@@ -24,6 +24,8 @@ between the first two is the one that matters most:
   wrong shape, and none of them measures shape fidelity at all.**
 * **Similarity to the experimental target** -- RMSD, TM-score, lDDT, Fnat.
   These are the ones that actually say whether the shape was reproduced.
+* **Distance from the target's own sequence** -- seq_recovery, BLOSUM62. How
+  far the design has drifted from the sequence that really forms the target.
 * **Read off the sequence alone** -- amyloid, LLPS, AGGRESCAN. Cheap, and blind
   to the predicted structure.
 * **The sequence judged against the reference backbone** -- ddG, mpnn.
@@ -38,6 +40,8 @@ between the first two is the one that matters most:
 | **TM-score** | 0 to 1 | higher | **> 0.5** | **0.102** | "Is this the same fold as the target?" Length-normalized; 0.5 is the conventional same-fold threshold |
 | **lDDT** | 0 to 1 | higher | > 0.7 | 0.127 | The same question asked **without superimposing anything** -- and the quantity pLDDT claims to predict |
 | **Fnat** | 0 to 1 | higher | > 0.5 | **0.0009** | "How many of the target's inter-chain contacts did we recover?" For a fibril: is it stacked at all? |
+| **seq_recovery** | 0 to 1 | -- | your choice | 1.0 by definition | "What fraction of positions still match the target's own sequence?" |
+| **BLOSUM62** | ~-1 to +5 | -- | your choice | +5.25 | The same question weighted by substitution: I to V is cheap, I to D is not |
 | **amyloid** | 0 to 1 | higher | max >= ~0.99 | mean 0.23, max 0.996 | "Does this sequence read like one that forms amyloid fibrils?" |
 | **LLPS** | 0 to 1 | usually lower | <= ~0.50 | 0.50 | "Does it read like one that condenses into liquid droplets instead?" |
 | **AGGRESCAN** | unbounded | higher | >= native | -13.50 | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
@@ -286,7 +290,9 @@ Search parameters:
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
 --w-ptm W            Weight for pTM (default: 0.0)
 --w-iptm W           Weight for interface pTM; higher is better (default: 0.0)
---w-tm-score W             Weight for TM-score; higher is better (default: 0.0)
+--w-seq-recovery W   Weight for sequence recovery vs the target's sequence (default: 0.0)
+--w-blosum62 W       Weight for the mean BLOSUM62 score vs it (default: 0.0)
+--w-tm-score W       Weight for TM-score; higher is better (default: 0.0)
 --w-lddt W           Weight for lDDT; higher is better (default: 0.0)
 --w-fnat W           Weight for Fnat; higher is better (default: 0.0)
 --w-ipae W           Weight for interface PAE; LOWER is better, so use a
@@ -469,9 +475,9 @@ Those costs are measured in isolation. In a full run the per-step time went from
 table implies; the extra was not traced (GPU contention or JAX recompilation are
 both plausible). Either way it is a small fraction of the AF2 call.
 
-Also recorded is `mpnn_identity`, the fraction of positions still matching the
-reference sequence -- a plain drift counter. ColabDesign's own `seqid` output is
-not used: it compares the scored sequence against itself and is always 1.0.
+ColabDesign's own `seqid` output is not used: it compares the scored sequence
+against itself and is always 1.0. Sequence identity to the reference is a
+separate, model-free metric -- see [Sequence homology](#sequence-homology).
 
 ### amyloid and LLPS
 
@@ -531,6 +537,42 @@ one means repeating every ESM evaluation.
 [`models/esm_heads/README.md`](models/esm_heads/README.md). If you publish
 numbers that use them, cite Lobo et al., *PNAS* **123**, e2531932123 (2026).
 
+### Sequence homology
+
+`homology.py` measures the candidate against **the target's own sequence**, with
+no model and no structure, in ~37 microseconds:
+
+| | what it is |
+|---|---|
+| `seq_recovery` | fraction of positions still matching, in [0, 1] |
+| `blosum62` | mean BLOSUM62 substitution score per position |
+| `blosum62_normalized` | the same divided by the reference's self-score, so identity is exactly 1.0 |
+
+`seq_recovery` is **ProteinMPNN's own `seq_recovery`**, verified against its
+implementation: the one-hot inner product of native and designed sequences over
+designable positions, which for a fully designable homo-oligomer reduces to
+plain identity (they agree to float32 rounding). The earlier tau polymorph
+analysis reports it for ProteinMPNN designs on 5O3L at 20-30%, median 26.7%,
+against the 55% quoted in the original ProteinMPNN paper.
+
+`blosum62` follows Gadhe et al. (2026), who characterize their designs with
+"blosum62 distances to the WT sequence" -- **but they do not give the formula**,
+so the convention here is ours and their numbers are not reproduced.
+
+The two disagree in the way that makes both worth having. Both of these are one
+mutation from native, so `seq_recovery` cannot tell them apart:
+
+| | seq_recovery | blosum62 |
+|---|---|---|
+| I3V (conservative) | 0.986 | +5.233 |
+| I3D (drastic) | 0.986 | +5.151 |
+
+Neither has a "good" direction imposed: a search may want to stay near native
+(positive weight) or to get away from it (negative), and which one is right is a
+question about the experiment, not about the metric. Both are measured against
+the native sequence rather than whatever `--initial-seq` a run started from, so
+a continued run reports on the same footing.
+
 ### Which metrics are present when
 
 Whether a key exists in `results.json` depends on the target and the flags, so
@@ -539,6 +581,7 @@ analysis code needs to handle absence. The complete set of conditions:
 | metric | present when |
 |--------|--------------|
 | pLDDT, RMSD, pTM, TM-score, lDDT, AGGRESCAN (and the `*_chain` variants) | always |
+| seq_recovery, BLOSUM62 | `data/<target>_sequence.txt` exists (prepare_reference.py writes it) |
 | ipTM, iPAE, Fnat | the target has more than one chain |
 | ddG | a matrix exists in `models/ddg/` for the target |
 | ProteinMPNN | `--mpnn-scores on`, or `--w-mpnn-score` is nonzero |
@@ -563,6 +606,7 @@ evaluate.py            SequenceEvaluator: sequence -> every metric + fitness
     +-> predict.py     AF2 black-box evaluator (AF2Predictor)
     +-> utils.py       RMSD computation + mutation operator
     +-> esm_scores.py  ESM2-3B amyloid / LLPS scores
+    +-> homology.py    seq_recovery / BLOSUM62 against the target's sequence
     +-> shape.py       TM-score / lDDT / Fnat against the reference
     +-> aggrescan.py   AGGRESCAN aggregation propensity
     +-> ddg.py         ThermoMPNN stability, from a precomputed matrix

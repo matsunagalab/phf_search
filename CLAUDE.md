@@ -9,6 +9,7 @@ predict.py           - AF2 prediction wrapper (ColabDesign hallucination protoco
 mc_search.py         - Monte Carlo search engine (mutate -> evaluate -> accept/reject)
 evaluate.py          - SequenceEvaluator: sequence -> all metrics + fitness (search-strategy agnostic)
 esm_scores.py        - ESMScorer: amyloid / LLPS probabilities from ESM2-3B embeddings
+homology.py          - Sequence vs the target's sequence: seq_recovery (ProteinMPNN's), BLOSUM62
 shape.py             - Shape fidelity vs the reference: TM-score, lDDT, Fnat, per-chain variants
 aggrescan.py         - AGGRESCAN reimplementation (a3v scale + sliding window + hot spots)
 mpnn_score.py        - MPNNScorer: ProteinMPNN inverse-folding score via ColabDesign's bundled model
@@ -63,6 +64,8 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 | `--w-rmsd` | 1.0 | RMSD weight |
 | `--w-ptm` | 0.0 | pTM weight |
 | `--w-iptm` | 0.0 | Interface pTM weight; higher is better |
+| `--w-seq-recovery` | 0.0 | Fraction of positions matching the target's sequence (ProteinMPNN's `seq_recovery`) |
+| `--w-blosum62` | 0.0 | Mean BLOSUM62 score per position against it |
 | `--w-tm-score` | 0.0 | TM-score weight; higher is better |
 | `--w-lddt` | 0.0 | lDDT weight; higher is better |
 | `--w-fnat` | 0.0 | Fnat weight; higher is better |
@@ -100,6 +103,8 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 - **Multimer confidences**: `ptm`, `i_ptm` and `i_pae` come out of the same AF2 forward pass as pLDDT and were previously discarded by `predict.py`, so recording them costs nothing. For a fibril `i_ptm` is the more meaningful confidence -- the structure *is* its inter-chain stacking -- and native PHF tau scores `i_ptm` 0.093 against pLDDT 0.235, i.e. AF2 misses the interface even harder than the fold. Bennett et al. 2023 found interface PAE the best in-silico filter for designed interfaces. **ColabDesign divides PAE by 31 A** (`af/loss.py`), so `i_pae` is in [0,1]; `i_pae_angstrom` is recorded for comparison against the literature's ~10 A thresholds (native: 27.8 A)
 - **Confidence vs fidelity**: pLDDT/pTM/ipTM/iPAE are AF2's opinion of itself and need no reference, so they can be high for a confidently wrong shape. `shape.py` adds the reference-based half -- TM-score (iterative superposition search, so the >0.5 same-fold threshold applies), lDDT (superposition-free, and the quantity pLDDT predicts), Fnat (fraction of the reference's inter-chain CA contacts recovered), plus per-chain variants. pure numpy on coordinates already in hand. Cost is not constant -- the TM-score refinement iterates more as structures converge, so it is ~250 ms at the current starting point (TM 0.10), ~530 ms at TM 0.58, ~150 ms on native itself: succeeding makes it more expensive
 - **Why the decomposition earns its cost**: on native PHF tau, global RMSD 34.97 A says only "not similar", while per-chain RMSD 20 A / per-chain lDDT 0.443 / global lDDT 0.127 / Fnat 0.0009 localize it -- the monomer C-shape is wrong *and* there is no stacking. The 6ELM monomer reaches TM-score 0.648 through the same pipeline, so the PHF failure is target-specific, not a general AF2 failure
+- **Sequence homology**: `homology.py`, ~37 us, no model. `seq_recovery` is ProteinMPNN's own quantity, verified against `protein_mpnn_run.py` (one-hot inner product of native and designed over designable positions; equals plain identity for a fully designable homo-oligomer, to float32 rounding). `blosum62` follows Gadhe et al.'s "blosum62 distances to the WT sequence", but they give no formula, so the mean-per-position convention is ours and their numbers are not reproduced. Measured against the target's **native** sequence (`data/<target>_sequence.txt`), not `--initial-seq`. Neither has an imposed direction: staying near native or moving away are both legitimate objectives
+- **Why `mpnn_identity` is gone**: it named where the quantity was computed rather than what it was -- it needs no model at all -- and being returned by `MPNNScorer` meant it vanished when ProteinMPNN was switched off. It is `seq_recovery` in `homology.py` now, always computed
 - **Metric presence**: a metric that does not apply is absent, not a placeholder. ipTM/iPAE/Fnat only exist for `copies > 1`; ddG only when `models/ddg/` has a matrix for the target; ProteinMPNN and amyloid/LLPS behind their `auto/on/off` flags. `results.json` records non-finite floats as `null` (`_convert` in run_search.py) because `json.dump` would emit a bare `NaN` that strict parsers reject
 - **Naming rule**: every weight flag is `--w-` plus its record key with `_` replaced by `-` (`tm_score` -> `--w-tm-score`). `predict.py` renames ColabDesign's `i_ptm`/`i_pae` to `iptm`/`ipae` to keep that rule total
 - **Fnat is not DockQ**: DockQ defines Fnat over all heavy atoms at 5 A, which is not comparable between sequences with different side chains. Here it is CA pairs at 8 A. Do not report these as DockQ values

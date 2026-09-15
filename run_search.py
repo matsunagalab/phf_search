@@ -88,6 +88,22 @@ def build_parser() -> argparse.ArgumentParser:
         "NEGATIVE weight to reward a confident interface",
     )
     parser.add_argument(
+        "--w-seq-recovery",
+        type=float,
+        default=0.0,
+        help="Sequence-recovery weight in fitness. Fraction of positions still "
+        "matching the target's own sequence (ProteinMPNN's seq_recovery); "
+        "higher means closer to native",
+    )
+    parser.add_argument(
+        "--w-blosum62",
+        type=float,
+        default=0.0,
+        help="BLOSUM62 weight in fitness. Mean substitution score per position "
+        "against the target's sequence, which unlike seq-recovery tells a "
+        "conservative substitution from a drastic one",
+    )
+    parser.add_argument(
         "--w-tm-score",
         type=float,
         default=0.0,
@@ -359,6 +375,20 @@ def main():
                 f"{args.pdb_id} chains {args.chains}, or provide --initial-seq."
             )
 
+    # The target's own sequence, for seq_recovery and blosum62. It is not
+    # necessarily the sequence a run starts from: --initial-seq may be a design,
+    # and homology should still be measured against the native.
+    native_path = os.path.join("data", f"{prefix}_sequence.txt")
+    native_sequence = None
+    if os.path.exists(native_path):
+        with open(native_path) as handle:
+            native_sequence = handle.read().strip()
+    elif args.w_seq_recovery != 0.0 or args.w_blosum62 != 0.0:
+        parser.error(
+            f"--w-seq-recovery/--w-blosum62 need the target's sequence at "
+            f"{native_path}, which prepare_reference.py writes."
+        )
+
     # prepare_reference.py writes 'X' where a chain holds a non-standard
     # residue, and neither the mutation operator nor AGGRESCAN can act on one.
     # Caught here, before AF2 spends time loading its parameters.
@@ -400,17 +430,13 @@ def main():
         # stale or mis-labelled matrix would shift every number without
         # erroring. precompute_ddg.py takes --reference-pdb independently of
         # the name it writes under, which is exactly how that happens.
-        native_path = os.path.join("data", f"{prefix}_sequence.txt")
-        if os.path.exists(native_path):
-            with open(native_path) as handle:
-                native = handle.read().strip()
-            if native != ddg_lookup.reference:
-                parser.error(
-                    f"the ddG matrix in {ddg_lookup.path} was built for a "
-                    f"different sequence than {native_path}. Every ddG would "
-                    "be measured from the wrong baseline; regenerate it with "
-                    "precompute_ddg.py."
-                )
+        if native_sequence is not None and native_sequence != ddg_lookup.reference:
+            parser.error(
+                f"the ddG matrix in {ddg_lookup.path} was built for a different "
+                f"sequence than data/{prefix}_sequence.txt. Every ddG would be "
+                "measured from the wrong baseline; regenerate it with "
+                "precompute_ddg.py."
+            )
 
     # MPNN scores the same backbone, so this catches a wrong-length
     # --initial-seq before AF2 loads, matching the ddG check above. The
@@ -443,6 +469,8 @@ def main():
         w_ptm=args.w_ptm,
         w_iptm=args.w_iptm,
         w_ipae=args.w_ipae,
+        w_seq_recovery=args.w_seq_recovery,
+        w_blosum62=args.w_blosum62,
         w_tm=args.w_tm_score,
         w_lddt=args.w_lddt,
         w_fnat=args.w_fnat,
@@ -454,12 +482,15 @@ def main():
         scorer=scorer,
         ddg_lookup=ddg_lookup,
         mpnn_scorer=mpnn_scorer,
+        reference_sequence=native_sequence,
         amyloid_agg=args.amyloid_agg,
         aggrescan_metric=args.aggrescan_metric,
     )
     terms = ["pLDDT", "RMSD", "pTM", "TM-score", "lDDT"]
     if n_chains > 1:
         terms += ["ipTM", "iPAE", "Fnat"]
+    if native_sequence is not None:
+        terms += ["seq-recovery", "BLOSUM62"]
     terms.append("AGGRESCAN")
     if ddg_lookup is not None:
         terms.append("ddG")

@@ -7,12 +7,16 @@ def compute_fitness(
     ptm: float | None = None,
     iptm: float | None = None,
     ipae: float | None = None,
+    seq_recovery: float | None = None,
+    blosum62: float | None = None,
     tm_score: float | None = None,
     lddt: float | None = None,
     fnat: float | None = None,
     w_ptm: float = 0.0,
     w_iptm: float = 0.0,
     w_ipae: float = 0.0,
+    w_seq_recovery: float = 0.0,
+    w_blosum62: float = 0.0,
     w_tm: float = 0.0,
     w_lddt: float = 0.0,
     w_fnat: float = 0.0,
@@ -42,6 +46,13 @@ def compute_fitness(
         ipae: mean inter-chain predicted aligned error, normalized by 31 A, so
             in [0, 1] and **lower is better** -- a search that wants a confident
             interface needs a negative `w_ipae`
+
+    Sequence-homology terms (homology.compare, both against the target's own
+    sequence, higher = closer to it):
+        seq_recovery: fraction of positions still matching, in [0, 1] --
+            ProteinMPNN's `seq_recovery`
+        blosum62: mean BLOSUM62 score per position, which unlike seq_recovery
+            distinguishes a conservative substitution from a drastic one
 
     Shape-fidelity terms (shape.compare, all higher = better, all in [0, 1]):
         tm_score: TM-score of the assembly against the reference; >0.5 is the
@@ -86,6 +97,10 @@ def compute_fitness(
         fitness += w_iptm * iptm
     if ipae is not None and w_ipae != 0.0:
         fitness += w_ipae * ipae
+    if seq_recovery is not None and w_seq_recovery != 0.0:
+        fitness += w_seq_recovery * seq_recovery
+    if blosum62 is not None and w_blosum62 != 0.0:
+        fitness += w_blosum62 * blosum62
     if tm_score is not None and w_tm != 0.0:
         fitness += w_tm * tm_score
     if lddt is not None and w_lddt != 0.0:

@@ -11,6 +11,7 @@ import logging
 import numpy as np
 
 import aggrescan
+import homology
 import shape as shape_metrics
 from fitness import compute_fitness
 from utils import min_permutation_rmsd
@@ -31,8 +32,11 @@ class SequenceEvaluator:
             terms. ptm/i_ptm/i_pae come free from the same AF2 pass and are
             always recorded; i_pae is lower-is-better, so `w_ipae` should be
             negative to reward a confident interface
+        w_seq_recovery, w_blosum62: weights of the sequence-homology terms,
+            measured against `reference_sequence`
+        w_tm, w_lddt, w_fnat: weights of the shape-fidelity terms
         w_amyloid, w_llps, w_aggrescan, w_ddg, w_mpnn: weights of the
-            sequence terms;
+            sequence terms.
             0.0 keeps a metric out of the fitness while still reporting it.
             Negative weights penalize -- and ddG is positive-is-destabilizing,
             so a search after stable designs wants `w_ddg` negative.
@@ -50,6 +54,8 @@ class SequenceEvaluator:
             numbers are a sum of independent single-mutant predictions against
             a fixed reference backbone -- see ddg.py for what that does and
             does not support.
+        reference_sequence: the target's own sequence, enabling seq_recovery
+            and blosum62. None skips them.
         aggrescan_metric: which AGGRESCAN scalar enters the fitness; all of them
             are recorded regardless.
     """
@@ -63,6 +69,8 @@ class SequenceEvaluator:
         w_ptm: float = 0.0,
         w_iptm: float = 0.0,
         w_ipae: float = 0.0,
+        w_seq_recovery: float = 0.0,
+        w_blosum62: float = 0.0,
         w_tm: float = 0.0,
         w_lddt: float = 0.0,
         w_fnat: float = 0.0,
@@ -74,6 +82,7 @@ class SequenceEvaluator:
         scorer=None,
         ddg_lookup=None,
         mpnn_scorer=None,
+        reference_sequence: str | None = None,
         amyloid_agg: str = "mean",
         aggrescan_metric: str = "na4vss",
     ):
@@ -94,6 +103,8 @@ class SequenceEvaluator:
         self.w_ptm = w_ptm
         self.w_iptm = w_iptm
         self.w_ipae = w_ipae
+        self.w_seq_recovery = w_seq_recovery
+        self.w_blosum62 = w_blosum62
         self.w_tm = w_tm
         self.w_lddt = w_lddt
         self.w_fnat = w_fnat
@@ -105,6 +116,7 @@ class SequenceEvaluator:
         self.scorer = scorer
         self.ddg_lookup = ddg_lookup
         self.mpnn_scorer = mpnn_scorer
+        self.reference_sequence = reference_sequence
         self.amyloid_agg = amyloid_agg
         self.aggrescan_metric = aggrescan_metric
 
@@ -112,6 +124,11 @@ class SequenceEvaluator:
             raise ValueError(
                 "w_amyloid/w_llps are nonzero but no scorer was given; "
                 "the fitness would silently drop those terms."
+            )
+        if reference_sequence is None and (w_seq_recovery != 0.0 or w_blosum62 != 0.0):
+            raise ValueError(
+                "w_seq_recovery/w_blosum62 are nonzero but no reference "
+                "sequence was given; the fitness would silently drop them."
             )
         if mpnn_scorer is None and w_mpnn != 0.0:
             raise ValueError(
@@ -133,9 +150,10 @@ class SequenceEvaluator:
             scalars (`aggrescan`, holding whichever one the fitness used, plus
             one `aggrescan_<name>` per quantity in aggrescan.SUMMARY_KEYS);
             when a ddG matrix is configured -- ddg, ddg_max, ddg_n_mutations;
-            when a ProteinMPNN scorer is configured -- mpnn_score,
-            mpnn_identity;
-            and when a scorer is configured -- amyloid, amyloid_mean,
+            when the native sequence is known -- seq_recovery, blosum62,
+            blosum62_normalized; the shape-fidelity metrics from
+            shape.compare; when a ProteinMPNN scorer is configured --
+            mpnn_score; and when an ESM scorer is configured -- amyloid, amyloid_mean,
             amyloid_max, llps, llps_mean, llps_max.
         """
         result = self.predictor.predict(seq)
@@ -154,6 +172,11 @@ class SequenceEvaluator:
         for key in ("ptm", "iptm", "ipae", "ipae_angstrom"):
             if key in result:
                 record[key] = result[key]
+
+        # Sequence homology to the target's own sequence: no model, no
+        # structure, ~37 us. Recorded whenever the native sequence is known.
+        if self.reference_sequence is not None:
+            record.update(homology.compare(seq, self.reference_sequence))
 
         # Shape fidelity against the reference, as opposed to AF2's confidence
         # in itself. One global RMSD cannot say whether a failure is in the
@@ -181,10 +204,7 @@ class SequenceEvaluator:
         if self.mpnn_scorer is not None:
             inverse_folding = self.mpnn_scorer.score(seq)
             mpnn_value = inverse_folding["mpnn_score"]
-            record.update(
-                mpnn_score=mpnn_value,
-                mpnn_identity=inverse_folding["mpnn_identity"],
-            )
+            record["mpnn_score"] = mpnn_value
 
         amyloid = llps = None
         if self.scorer is not None:
@@ -212,12 +232,16 @@ class SequenceEvaluator:
             ptm=record.get("ptm"),
             iptm=record.get("iptm"),
             ipae=record.get("ipae"),
+            seq_recovery=record.get("seq_recovery"),
+            blosum62=record.get("blosum62"),
             tm_score=record.get("tm_score"),
             lddt=record.get("lddt"),
             fnat=record.get("fnat"),
             w_ptm=self.w_ptm,
             w_iptm=self.w_iptm,
             w_ipae=self.w_ipae,
+            w_seq_recovery=self.w_seq_recovery,
+            w_blosum62=self.w_blosum62,
             w_tm=self.w_tm,
             w_lddt=self.w_lddt,
             w_fnat=self.w_fnat,
@@ -241,8 +265,8 @@ class SequenceEvaluator:
                 + ", ".join(
                     f"{k}={record[k]}"
                     for k in ("plddt", "rmsd", "ptm", "iptm", "ipae",
-                              "tm_score", "lddt", "fnat", "aggrescan", "ddg",
-                              "mpnn_score")
+                              "tm_score", "lddt", "fnat", "seq_recovery",
+                              "blosum62", "aggrescan", "ddg", "mpnn_score")
                     if k in record
                 )
             )
@@ -262,6 +286,8 @@ class SequenceEvaluator:
         # Each key is checked on its own: a metric that does not apply to the
         # target is absent from the record, not present-and-nan, so testing one
         # key and reading another is how this breaks.
+        if "seq_recovery" in record:
+            parts.append(f"recov={record['seq_recovery']:.3f}")
         if "tm_score" in record:
             parts.append(f"TM={record['tm_score']:.3f}")
         if "lddt" in record:
