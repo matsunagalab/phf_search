@@ -11,25 +11,38 @@ The evaluator is [AlphaFold2](https://github.com/google-deepmind/alphafold) (AF2
 | Aspect | Details |
 |--------|---------|
 | **Search space** | Strings of length *L* over a 20-letter alphabet (amino acids) |
-| **Objective** | Maximize `fitness = w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN + w_ddg * ddG + w_mpnn * mpnn` |
+| **Objective** | Maximize a weighted sum of the metrics below; `w_plddt * pLDDT - w_rmsd * RMSD` by default, with every other term at weight 0 |
 | **Evaluation cost** | ~seconds per call on GPU (AlphaFold2 forward pass) |
 
 ## What the metrics mean
 
-No biology background needed. Two come from the 3D structure AF2 predicts for a
-candidate. Three more are read off the sequence, far more cheaply, and say
-nothing about that predicted structure -- the last of them, ddG, is scored
-against the *reference* structure instead.
+No biology background needed. They fall into four groups, and the distinction
+between the first two is the one that matters most:
+
+* **AF2's confidence in its own answer** -- pLDDT, pTM, ipTM, iPAE. These need
+  no reference structure, which also means **they can be high for a
+  confidently wrong shape.**
+* **Similarity to the experimental target** -- RMSD, TM-score, lDDT, Fnat.
+  These are the ones that actually say whether the shape was reproduced.
+* **Read off the sequence alone** -- amyloid, LLPS, AGGRESCAN. Cheap, and blind
+  to the predicted structure.
+* **The sequence judged against the reference backbone** -- ddG, mpnn.
 
 | Metric | Range | Direction | What it asks |
 |--------|-------|-----------|--------------|
 | **pLDDT** | 0 to 1 | higher | "How sure is AF2 that the shape it just predicted is right?" |
 | **RMSD** | 0 to inf (angstroms) | lower | "How far is that predicted shape from the experimental target?" |
+| **pTM** | 0 to 1 | higher | "How sure is AF2 of the overall shape, as a predicted TM-score?" |
+| **ipTM** | 0 to 1 | higher | The same restricted to **inter-chain** pairs -- how sure it is of the interface |
+| **iPAE** | 0 to 1 (also in A) | **lower** | "How large an error does AF2 expect between residues on *different* chains?" |
+| **TM-score** | 0 to 1 | higher | "Is this the same fold as the target?" Length-normalized; >0.5 is the conventional same-fold threshold |
+| **lDDT** | 0 to 1 | higher | The same question asked **without superimposing anything** -- and the quantity pLDDT claims to predict |
+| **Fnat** | 0 to 1 | higher | "How many of the target's inter-chain contacts did we recover?" For a fibril: is it stacked at all? |
 | **amyloid** | 0 to 1 | higher | "Does this sequence read like one that forms amyloid fibrils?" |
 | **LLPS** | 0 to 1 | usually lower | "Does it read like one that condenses into liquid droplets instead?" |
 | **AGGRESCAN** | unbounded | higher | "Do its residues add up to an aggregation-prone stretch?" -- the same question as *amyloid*, asked by twenty numbers instead of a neural network |
 | **ddG** | kcal/mol | **lower** | "Would these substitutions make the target structure less stable?" Positive = destabilizing |
-| **mpnn** | ~0 to 3 | **lower** | "Would an inverse-folding model have proposed this sequence for this backbone?" |
+| **mpnn** | ~0.6 to 1.3 | **lower** | "Would an inverse-folding model have proposed this sequence for this backbone?" |
 
 **pLDDT** is the predictor's own confidence, averaged over residues. Above ~0.8
 AF2 is asserting a definite fold; below ~0.5 it is effectively saying "I don't
@@ -38,6 +51,38 @@ know", and the coordinates it returns should not be trusted.
 **RMSD** is the distance between predicted and target coordinates after optimal
 superposition, in angstroms. Below ~2 A is the same structure; below ~5 A is
 recognizably the same fold; above ~15 A the two have nothing in common.
+
+**pTM, ipTM and iPAE** are the multimer confidences, and they cost nothing --
+AF2 produces them in the same forward pass as pLDDT, and this pipeline simply
+used to discard them. **ipTM is the one to watch here**: a fibril *is* its
+inter-chain stacking, so the confidence in the interface is more to the point
+than the confidence in a single chain. The de novo binder-design literature
+reaches the same conclusion from the other direction -- Bennett et al. (2023)
+found interface PAE to be the single best in-silico predictor of whether a
+designed interface works, with pLDDT a weaker filter.
+
+Two traps. ColabDesign divides PAE by 31 A (its largest PAE bin), so `i_pae` is
+in [0, 1], not angstroms; `i_pae_angstrom` is recorded alongside it, verified
+equal to the mean of the inter-chain block of the raw PAE matrix to within
+0.001 A. And this pipeline runs AF2 in **non-multimer** mode, building chains
+from `copies` plus a residue-index offset, so `i_ptm` is ColabDesign's
+interface-masked quantity rather than AF-Multimer's official ipTM -- the ~10 A
+interface-PAE thresholds from the binder-design literature were measured with
+AF-Multimer and do not transfer unexamined.
+
+These three exist only when there is an interface: a monomer target records no
+`i_ptm`, `i_pae` or `i_pae_angstrom`, and its `fnat` is `nan` rather than a
+misleading 0.
+
+**Shape fidelity** (`shape.py`) adds TM-score, lDDT and Fnat, plus per-chain
+`tm_score_chain` / `lddt_chain` / `rmsd_chain` so the monomer fold can be judged
+apart from the stacking. All of it runs on the CA coordinates already in hand,
+in ~385 ms per candidate (~4% of the AF2 call), with no new dependency. The
+TM-score follows the `TM-score` program's iterative superposition search, so the
+0.5 threshold is meaningful; Fnat is defined on CA pairs rather than all heavy
+atoms as DockQ defines it, because a designed sequence has different side chains
+from the reference and a side-chain contact set would not be comparable -- so
+these are not DockQ numbers.
 
 **amyloid** and **LLPS** are probabilities from binary classifiers, so **0.5 is
 the decision boundary**: above 0.5 the sequence is on the "forms amyloid" /
@@ -55,6 +100,30 @@ relative ordering means anything. Keeping it alongside the language-model score
 is the point: when a transparent index and a learned one disagree about the same
 sequence, that disagreement is information about the indices.
 
+### Confidence is not fidelity
+
+The point of having both groups: **ipTM and iPAE do not measure shape.** They
+are AF2's self-assessment. RMSD does measure shape, but one global number
+cannot say *where* a failure is -- a single badly placed chain spoils it even
+when every chain's fold is right, and the superposition mixes the monomer fold
+together with the stacking.
+
+Measured on native PHF tau, the decomposition says what RMSD alone cannot:
+
+| | value | reading |
+|---|---|---|
+| global RMSD | 34.97 A | "not similar", and nothing more |
+| per-chain RMSD | 20.0 A | the single-chain C-shape is wrong too, so this is not only a stacking failure |
+| per-chain lDDT | 0.443 | local geometry is partly plausible |
+| global lDDT | 0.127 | the assembly is not |
+| **Fnat** | **0.0009** | of 2346 native inter-chain contacts, **0.1% recovered** -- there is no stacking |
+
+And the monomer target makes the contrast sharp. On WNK2 CCT1 (6ELM) the same
+pipeline gets TM-score **0.648**, past the 0.5 same-fold threshold, with lDDT
+0.662 and RMSD 4.0 A. So the failure on PHF is not "AF2 cannot do this" -- it is
+specific to the fibril. Comparing 4.0 A against 35 A is just two numbers;
+comparing 0.648 against 0.102 straddles an interpretable threshold.
+
 ### What counts as a good value
 
 The goal of this project is concrete: **find a sequence whose AF2 prediction is
@@ -65,6 +134,11 @@ serve that goal in different roles, so their target values are not symmetric.
 |--------|---------|-------------------|
 | **RMSD** | **< 5 A**, ideally < 2 A | **The success criterion.** It is the only metric that directly answers "is this the PHF fold?" |
 | **pLDDT** | **> 0.8** | **Necessary companion.** A low RMSD with pLDDT ~0.3 means AF2 is not actually asserting that fold, so the match is not to be trusted |
+| **ipTM** | **> 0.8** | The interface version of that companion, and the more telling one for a fibril. Native scores 0.093 |
+| **iPAE** | **< ~10 A** | The binder-design literature's threshold for a credible interface. Native is 27.8 A -- but see the caveat below about this not being AF-Multimer |
+| **TM-score** | **> 0.5** | The same-fold threshold, and the most interpretable success criterion here. Native scores 0.102; the 6ELM monomer manages 0.648 |
+| **lDDT** | **> 0.7** | Superposition-free, so it does not inherit RMSD's sensitivity to one stray chain. Native scores 0.127 |
+| **Fnat** | **> 0.5** | Is it stacked? Native scores 0.0009, i.e. not at all |
 | **amyloid** (max) | **>= ~0.99** | **Plausibility check.** The target is an amyloid fibril; a hit whose amyloidogenic core has been mutated away is suspect even if AF2 likes it |
 | **amyloid** (mean) | **>= ~0.23** | Keep it at or above the real filament sequence; there is no reason to push it toward 1.0 (see below) |
 | **LLPS** | **<= ~0.50** | Droplets are the competing fate of tau. Lower than native steers toward the fibril -- a hypothesis you choose to encode, not an established correction |
@@ -80,6 +154,12 @@ filament in reality:
 |--------|---------------|---------|
 | pLDDT | 0.23 | AF2 has no confidence in *any* fold for this sequence |
 | RMSD | 35 A | the predicted shape is nothing like the real filament |
+| pTM | 0.133 | nor in the assembly as a whole |
+| TM-score | 0.102 | and the shape really is not there, independent of AF2's opinion |
+| lDDT | 0.127 | likewise, without any superposition |
+| Fnat | 0.0009 | essentially no native inter-chain contact is recovered |
+| **ipTM** | **0.093** | and least of all in the interface -- lower than pLDDT, i.e. the stacking that makes it a fibril is exactly what AF2 misses |
+| iPAE | 27.8 A | against a ~10 A threshold for a credible interface |
 | amyloid (mean) | 0.23 | most of the sequence is not amyloidogenic on its own |
 | amyloid (max) | 0.996 | but it holds an almost maximally amyloidogenic window (VQIVYK, residues 1-6) |
 | LLPS | 0.50 | right on the boundary; tau is known to do both |
@@ -213,6 +293,13 @@ Search parameters:
 --num-recycles N     AF2 recycles (default: 3)
 --w-plddt W          Weight for pLDDT in fitness (default: 1.0)
 --w-rmsd W           Weight for RMSD in fitness (default: 1.0)
+--w-ptm W            Weight for pTM (default: 0.0)
+--w-iptm W           Weight for interface pTM; higher is better (default: 0.0)
+--w-tm W             Weight for TM-score; higher is better (default: 0.0)
+--w-lddt W           Weight for lDDT; higher is better (default: 0.0)
+--w-fnat W           Weight for Fnat; higher is better (default: 0.0)
+--w-ipae W           Weight for interface PAE; LOWER is better, so use a
+                     NEGATIVE weight (default: 0.0)
 --w-aggrescan W      Weight for AGGRESCAN; negative penalizes (default: 0.0)
 --aggrescan-metric M na4vss | a3vsa | thsar (default: na4vss)
 --w-ddg W            Weight for ThermoMPNN ddG. Use a NEGATIVE weight to favour

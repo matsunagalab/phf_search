@@ -70,6 +70,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--w-rmsd", type=float, default=1.0, help="RMSD weight in fitness"
     )
     parser.add_argument(
+        "--w-ptm", type=float, default=0.0, help="pTM weight in fitness"
+    )
+    parser.add_argument(
+        "--w-iptm",
+        type=float,
+        default=0.0,
+        help="Interface pTM weight in fitness. Higher is better, like pLDDT, "
+        "and for a fibril it is the confidence in the contacts that define it",
+    )
+    parser.add_argument(
+        "--w-ipae",
+        type=float,
+        default=0.0,
+        help="Interface PAE weight in fitness. LOWER is better, so use a "
+        "NEGATIVE weight to reward a confident interface",
+    )
+    parser.add_argument(
+        "--w-tm",
+        type=float,
+        default=0.0,
+        help="TM-score weight in fitness. Shape fidelity against the "
+        "reference, higher is better, >0.5 means the same fold",
+    )
+    parser.add_argument(
+        "--w-lddt",
+        type=float,
+        default=0.0,
+        help="lDDT weight in fitness. Superposition-free shape fidelity, "
+        "higher is better, and the quantity pLDDT claims to predict",
+    )
+    parser.add_argument(
+        "--w-fnat",
+        type=float,
+        default=0.0,
+        help="Fnat weight in fitness. Fraction of the reference's inter-chain "
+        "contacts recovered -- the stacking, for a fibril. Higher is better; "
+        "undefined for a single chain",
+    )
+    parser.add_argument(
         "--w-aggrescan",
         type=float,
         default=0.0,
@@ -398,6 +437,12 @@ def main():
         ref_coords=ref_coords,
         w_plddt=args.w_plddt,
         w_rmsd=args.w_rmsd,
+        w_ptm=args.w_ptm,
+        w_iptm=args.w_iptm,
+        w_ipae=args.w_ipae,
+        w_tm=args.w_tm,
+        w_lddt=args.w_lddt,
+        w_fnat=args.w_fnat,
         w_amyloid=args.w_amyloid,
         w_llps=args.w_llps,
         w_aggrescan=args.w_aggrescan,
@@ -409,12 +454,17 @@ def main():
         amyloid_agg=args.amyloid_agg,
         aggrescan_metric=args.aggrescan_metric,
     )
-    logger.info(
-        "Fitness terms: pLDDT, RMSD, AGGRESCAN%s%s%s",
-        ", ddG" if ddg_lookup is not None else "",
-        ", ProteinMPNN" if mpnn_scorer is not None else "",
-        ", amyloid, LLPS" if scorer is not None else "",
-    )
+    terms = ["pLDDT", "RMSD", "pTM", "TM-score", "lDDT"]
+    if n_chains > 1:
+        terms += ["ipTM", "iPAE", "Fnat"]
+    terms.append("AGGRESCAN")
+    if ddg_lookup is not None:
+        terms.append("ddG")
+    if mpnn_scorer is not None:
+        terms.append("ProteinMPNN")
+    if scorer is not None:
+        terms += ["amyloid", "LLPS"]
+    logger.info("Fitness terms: %s", ", ".join(terms))
 
     # Run MC search
     mc = MonteCarloSearch(

@@ -5,10 +5,11 @@ Sequence optimization for protein structures using AlphaFold2 via ColabDesign. S
 ## Project Structure
 
 ```
-predict.py           - AF2 prediction wrapper (ColabDesign hallucination protocol, configurable length/copies)
+predict.py           - AF2 prediction wrapper (ColabDesign hallucination protocol); returns pLDDT, pTM, ipTM, iPAE, coords
 mc_search.py         - Monte Carlo search engine (mutate -> evaluate -> accept/reject)
 evaluate.py          - SequenceEvaluator: sequence -> all metrics + fitness (search-strategy agnostic)
 esm_scores.py        - ESMScorer: amyloid / LLPS probabilities from ESM2-3B embeddings
+shape.py             - Shape fidelity vs the reference: TM-score, lDDT, Fnat, per-chain variants
 aggrescan.py         - AGGRESCAN reimplementation (a3v scale + sliding window + hot spots)
 mpnn_score.py        - MPNNScorer: ProteinMPNN inverse-folding score via ColabDesign's bundled model
 ddg.py               - DDGLookup: candidate ddG by summing a precomputed ThermoMPNN matrix
@@ -60,6 +61,12 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 | `--num-recycles` | 3 | AF2 recycles |
 | `--w-plddt` | 1.0 | pLDDT weight |
 | `--w-rmsd` | 1.0 | RMSD weight |
+| `--w-ptm` | 0.0 | pTM weight |
+| `--w-iptm` | 0.0 | Interface pTM weight; higher is better |
+| `--w-tm` | 0.0 | TM-score weight; higher is better |
+| `--w-lddt` | 0.0 | lDDT weight; higher is better |
+| `--w-fnat` | 0.0 | Fnat weight; higher is better |
+| `--w-ipae` | 0.0 | Interface PAE weight; LOWER is better, so the weight should be NEGATIVE |
 | `--w-aggrescan` | 0.0 | AGGRESCAN weight; negative penalizes |
 | `--mpnn-scores` | `auto` | `auto` (on when `--w-mpnn` is nonzero) / `on` / `off` |
 | `--w-mpnn` | 0.0 | ProteinMPNN weight. Score is a negative log probability, so LOWER is better and the weight should be NEGATIVE |
@@ -89,7 +96,13 @@ uv run python run_search.py --pdb-id 6ELM --chains A --n-steps 100
 
 - **Prediction**: ColabDesign hallucination protocol, non-multimer (ptm models), configurable `copies` (5 for PHF, 1 for monomers)
 - **Structure comparison**: Kabsch RMSD over all n_chains! chain permutations, taking the minimum (trivial for monomers)
-- **Fitness**: `w_plddt * pLDDT - w_rmsd * RMSD + w_amyloid * amyloid + w_llps * LLPS + w_aggrescan * AGGRESCAN + w_ddg * ddG` (higher is better; a metric passed as `None` drops out of the sum). Everything past `w_rmsd` in `compute_fitness` is keyword-only: each added metric used to shift the positional arguments of the ones after it, silently reassigning a caller's weights
+- **Fitness**: a weighted sum over every metric below, `w_plddt * pLDDT - w_rmsd * RMSD` by default with all other weights 0 (higher is better; a metric passed as `None` drops out of the sum). Everything past `w_rmsd` in `compute_fitness` is keyword-only: each added metric used to shift the positional arguments of the ones after it, silently reassigning a caller's weights
+- **Multimer confidences**: `ptm`, `i_ptm` and `i_pae` come out of the same AF2 forward pass as pLDDT and were previously discarded by `predict.py`, so recording them costs nothing. For a fibril `i_ptm` is the more meaningful confidence -- the structure *is* its inter-chain stacking -- and native PHF tau scores `i_ptm` 0.093 against pLDDT 0.235, i.e. AF2 misses the interface even harder than the fold. Bennett et al. 2023 found interface PAE the best in-silico filter for designed interfaces. **ColabDesign divides PAE by 31 A** (`af/loss.py`), so `i_pae` is in [0,1]; `i_pae_angstrom` is recorded for comparison against the literature's ~10 A thresholds (native: 27.8 A)
+- **Confidence vs fidelity**: pLDDT/pTM/ipTM/iPAE are AF2's opinion of itself and need no reference, so they can be high for a confidently wrong shape. `shape.py` adds the reference-based half -- TM-score (iterative superposition search, so the >0.5 same-fold threshold applies), lDDT (superposition-free, and the quantity pLDDT predicts), Fnat (fraction of the reference's inter-chain CA contacts recovered), plus per-chain variants. ~385 ms/candidate, pure numpy on coordinates already in hand
+- **Why the decomposition earns its cost**: on native PHF tau, global RMSD 34.97 A says only "not similar", while per-chain RMSD 20 A / per-chain lDDT 0.443 / global lDDT 0.127 / Fnat 0.0009 localize it -- the monomer C-shape is wrong *and* there is no stacking. The 6ELM monomer reaches TM-score 0.648 through the same pipeline, so the PHF failure is target-specific, not a general AF2 failure
+- **Fnat is not DockQ**: DockQ defines Fnat over all heavy atoms at 5 A, which is not comparable between sequences with different side chains. Here it is CA pairs at 8 A. Do not report these as DockQ values
+- **Interface metrics need an interface**: `i_ptm`/`i_pae`/`i_pae_angstrom` are emitted only for `copies > 1` (ColabDesign adds `i_pae` to the losses only then, and pops `i_ptm` from its own log for a single chain because it returns a meaningless 0.0), and `fnat` is `nan` for one chain
+- **Weight 0 skips the term rather than multiplying by zero**: `0.0 * nan` is `nan`, which combined with the non-finite-fitness guard would abort a run over a metric nobody asked to optimize
 - **Sequence scores**: ESM2-3B (layer 36, mean-pooled) -> logistic regression, per Lobo et al., PNAS 123:e2531932123 (2026). ESM2 is loaded once and shared by both heads, the windows of a candidate are batched together, and results are cached per sequence. Agrees with the upstream `amyloid-predict` / `llps-predict` CLIs to <1e-6 on the three values tested (VQIVYK via the 6aa and general heads, the tau 73mer via the LLPS head) -- re-check after changing batching, dtype or device, since the equivalence is empirical, not structural
 - **Recorded metrics**: `amyloid_mean` and `amyloid_max` (likewise for LLPS) are always both written to every record, and `amyloid`/`llps` hold the aggregate the fitness used (`--amyloid-agg`; the LLPS term always uses the mean, which equals the score under whole-sequence LLPS scoring). Selecting one aggregate must never cost the other, since a rerun means redoing every ESM evaluation
 - **CLI surface**: only the knobs that change results or unblock a machine are flags. LLPS windowing, the amyloid classifier policy and the checkpoint directory are `ESMScorer` constructor arguments, whose defaults are the lengths and heads the published classifiers were trained for

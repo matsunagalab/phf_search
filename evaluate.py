@@ -11,6 +11,7 @@ import logging
 import numpy as np
 
 import aggrescan
+import shape as shape_metrics
 from fitness import compute_fitness
 from utils import min_permutation_rmsd
 
@@ -26,7 +27,10 @@ class SequenceEvaluator:
     Args:
         predictor: AF2Predictor (or anything with the same `predict()`)
         ref_coords: reference CA coordinates, shape (n_chains, n_residues, 3)
-        w_plddt, w_rmsd: weights of the structural terms
+        w_plddt, w_rmsd, w_ptm, w_iptm, w_ipae: weights of the structural
+            terms. ptm/i_ptm/i_pae come free from the same AF2 pass and are
+            always recorded; i_pae is lower-is-better, so `w_ipae` should be
+            negative to reward a confident interface
         w_amyloid, w_llps, w_aggrescan, w_ddg, w_mpnn: weights of the
             sequence terms;
             0.0 keeps a metric out of the fitness while still reporting it.
@@ -56,6 +60,12 @@ class SequenceEvaluator:
         ref_coords: np.ndarray,
         w_plddt: float = 1.0,
         w_rmsd: float = 1.0,
+        w_ptm: float = 0.0,
+        w_iptm: float = 0.0,
+        w_ipae: float = 0.0,
+        w_tm: float = 0.0,
+        w_lddt: float = 0.0,
+        w_fnat: float = 0.0,
         w_amyloid: float = 0.0,
         w_llps: float = 0.0,
         w_aggrescan: float = 0.0,
@@ -81,6 +91,12 @@ class SequenceEvaluator:
         self.ref_coords = ref_coords
         self.w_plddt = w_plddt
         self.w_rmsd = w_rmsd
+        self.w_ptm = w_ptm
+        self.w_iptm = w_iptm
+        self.w_ipae = w_ipae
+        self.w_tm = w_tm
+        self.w_lddt = w_lddt
+        self.w_fnat = w_fnat
         self.w_amyloid = w_amyloid
         self.w_llps = w_llps
         self.w_aggrescan = w_aggrescan
@@ -132,6 +148,17 @@ class SequenceEvaluator:
             "perm": perm,
             "pdb_str": result["pdb_str"],
         }
+        # Free: the same AF2 forward pass produced them. i_ptm and i_pae speak
+        # to the inter-chain interface, which is what a fibril is made of, and
+        # are absent for a single chain.
+        for key in ("ptm", "i_ptm", "i_pae", "i_pae_angstrom"):
+            if key in result:
+                record[key] = result[key]
+
+        # Shape fidelity against the reference, as opposed to AF2's confidence
+        # in itself. One global RMSD cannot say whether a failure is in the
+        # monomer fold or in the stacking; these separate the two.
+        record.update(shape_metrics.compare(result["ca_coords"], self.ref_coords))
 
         # Always on: a table lookup and a sliding window over ~73 numbers.
         agg = aggrescan.score(seq)
@@ -182,6 +209,18 @@ class SequenceEvaluator:
             rmsd=rmsd,
             w_plddt=self.w_plddt,
             w_rmsd=self.w_rmsd,
+            ptm=record.get("ptm"),
+            i_ptm=record.get("i_ptm"),
+            i_pae=record.get("i_pae"),
+            tm_score=record.get("tm_score"),
+            lddt=record.get("lddt"),
+            fnat=record.get("fnat"),
+            w_ptm=self.w_ptm,
+            w_iptm=self.w_iptm,
+            w_ipae=self.w_ipae,
+            w_tm=self.w_tm,
+            w_lddt=self.w_lddt,
+            w_fnat=self.w_fnat,
             amyloid=amyloid,
             llps=llps,
             aggrescan=record["aggrescan"],
@@ -201,7 +240,8 @@ class SequenceEvaluator:
                 f"non-finite fitness {record['fitness']} for {seq}; metrics: "
                 + ", ".join(
                     f"{k}={record[k]}"
-                    for k in ("plddt", "rmsd", "aggrescan", "ddg", "mpnn_score")
+                    for k in ("plddt", "rmsd", "i_ptm", "i_pae", "aggrescan",
+                              "ddg", "mpnn_score")
                     if k in record
                 )
             )
@@ -214,6 +254,15 @@ class SequenceEvaluator:
         max-mode one.
         """
         parts = [f"pLDDT={record['plddt']:.4f}", f"RMSD={record['rmsd']:.2f}"]
+        if "i_ptm" in record:
+            parts.append(f"ipTM={record['i_ptm']:.3f}")
+        if "i_pae_angstrom" in record:
+            parts.append(f"ipae={record['i_pae_angstrom']:.1f}A")
+        if "tm_score" in record:
+            parts.append(f"TM={record['tm_score']:.3f}")
+            parts.append(f"lDDT={record['lddt']:.3f}")
+            if not np.isnan(record["fnat"]):
+                parts.append(f"Fnat={record['fnat']:.3f}")
         parts.append(f"aggrescan({self.aggrescan_metric})={record['aggrescan']:.3f}")
         if self.ddg_lookup is not None:
             parts.append(f"ddG={record['ddg']:+.2f}")
