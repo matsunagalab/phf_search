@@ -570,6 +570,23 @@ mutation from native, so `seq_recovery` cannot tell them apart:
 | I3V (conservative) | 0.986 | +5.233 |
 | I3D (drastic) | 0.986 | +5.151 |
 
+**With `--fix-pos`, read the designed-subset figures.** Held positions match
+the reference by construction, so a whole-sequence recovery starts at a floor
+that has nothing to do with the search. When positions are held, the record also
+carries `seq_recovery_designed` and `blosum62_designed` over the positions the
+search can change, and the log line shows `recov(designed)` instead of `recov`.
+
+The earlier tau work documents exactly this trap. An AfDesign run holding
+`332-342,356-367` (23 of 73 residues) recovered **0.06-0.10** of the 50 designed
+positions while the whole-sequence figure read **0.36-0.38** -- the gap is
+entirely the 23 held residues matching themselves. The two must never be quoted
+interchangeably.
+
+The fitness term still uses the whole-sequence value, so `--w-seq-recovery`
+means the same thing whether or not positions are held; under Metropolis the
+held residues' contribution is a constant that cancels in the acceptance
+difference.
+
 Neither has a "good" direction imposed: a search may want to stay near native
 (positive weight) or to get away from it (negative), and which one is right is a
 question about the experiment, not about the metric. Both are measured against
@@ -623,6 +640,7 @@ analysis code needs to handle absence. The complete set of conditions:
 |--------|--------------|
 | pLDDT, RMSD, pTM, TM-score, lDDT, AGGRESCAN (and the `*_chain` variants) | always |
 | seq_recovery, BLOSUM62 | `data/<target>_sequence.txt` exists (prepare_reference.py writes it) |
+| seq_recovery_designed, blosum62_designed | `--fix-pos` holds at least one position |
 | ipTM, iPAE, Fnat | the target has more than one chain |
 | ddG | a matrix exists in `models/ddg/` for the target |
 | ProteinMPNN | `--mpnn-scores on`, or `--w-mpnn-score` is nonzero |

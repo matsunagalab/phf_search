@@ -56,6 +56,11 @@ class SequenceEvaluator:
             does not support.
         reference_sequence: the target's own sequence, enabling seq_recovery
             and blosum62. None skips them.
+        designable: the indices the search may change (from `--fix-pos`). Held
+            positions match the reference by construction, so passing this adds
+            the same homology measures restricted to what the search can
+            actually alter -- otherwise the whole-sequence figures read high for
+            a reason that has nothing to do with the search.
         aggrescan_metric: which AGGRESCAN scalar enters the fitness; all of them
             are recorded regardless.
     """
@@ -83,6 +88,7 @@ class SequenceEvaluator:
         ddg_lookup=None,
         mpnn_scorer=None,
         reference_sequence: str | None = None,
+        designable: list[int] | None = None,
         amyloid_agg: str = "mean",
         aggrescan_metric: str = "na4vss",
     ):
@@ -117,6 +123,7 @@ class SequenceEvaluator:
         self.ddg_lookup = ddg_lookup
         self.mpnn_scorer = mpnn_scorer
         self.reference_sequence = reference_sequence
+        self.designable = designable
         self.amyloid_agg = amyloid_agg
         self.aggrescan_metric = aggrescan_metric
 
@@ -151,7 +158,8 @@ class SequenceEvaluator:
             one `aggrescan_<name>` per quantity in aggrescan.SUMMARY_KEYS);
             when a ddG matrix is configured -- ddg, ddg_max, ddg_n_mutations;
             when the native sequence is known -- seq_recovery, blosum62,
-            blosum62_normalized; the shape-fidelity metrics from
+            blosum62_normalized, and with positions held also
+            seq_recovery_designed and blosum62_designed; the shape-fidelity metrics from
             shape.compare; when a ProteinMPNN scorer is configured --
             mpnn_score; and when an ESM scorer is configured -- amyloid, amyloid_mean,
             amyloid_max, llps, llps_mean, llps_max.
@@ -176,7 +184,11 @@ class SequenceEvaluator:
         # Sequence homology to the target's own sequence: no model, no
         # structure, ~37 us. Recorded whenever the native sequence is known.
         if self.reference_sequence is not None:
-            record.update(homology.compare(seq, self.reference_sequence))
+            record.update(
+                homology.compare(
+                    seq, self.reference_sequence, designable=self.designable
+                )
+            )
 
         # Shape fidelity against the reference, as opposed to AF2's confidence
         # in itself. One global RMSD cannot say whether a failure is in the
@@ -286,7 +298,11 @@ class SequenceEvaluator:
         # Each key is checked on its own: a metric that does not apply to the
         # target is absent from the record, not present-and-nan, so testing one
         # key and reading another is how this breaks.
-        if "seq_recovery" in record:
+        if "seq_recovery_designed" in record:
+            # With positions held, the whole-sequence figure carries a floor
+            # from the held residues; the designed one is what a reader wants.
+            parts.append(f"recov(designed)={record['seq_recovery_designed']:.3f}")
+        elif "seq_recovery" in record:
             parts.append(f"recov={record['seq_recovery']:.3f}")
         if "tm_score" in record:
             parts.append(f"TM={record['tm_score']:.3f}")

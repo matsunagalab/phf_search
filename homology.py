@@ -38,6 +38,11 @@ sequence scores negative. Only `seq_recovery` is a fraction.
 Both are measured against the **target's native sequence**, not against
 whatever `--initial-seq` a run happened to start from, so a restarted or
 continued search reports numbers on the same footing.
+
+With `--fix-pos` in play the whole-sequence figures carry a floor: held
+positions match the reference by construction. `compare()` then also reports
+`seq_recovery_designed` and `blosum62_designed` over the positions the search
+can actually change, which is the number that says what the search achieved.
 """
 
 import numpy as np
@@ -98,18 +103,48 @@ def blosum62(sequence: str, reference: str) -> float:
     )
 
 
-def compare(sequence: str, reference: str) -> dict:
-    """Both measures, plus the normalized BLOSUM62 score.
+def compare(
+    sequence: str, reference: str, designable: list[int] | None = None
+) -> dict:
+    """Both measures over the whole sequence, and over the designed part.
+
+    Args:
+        sequence, reference: equal-length sequences over the 20 residues
+        designable: indices the search is allowed to change. When `--fix-pos`
+            holds some positions, those match the reference by construction and
+            inflate a whole-sequence figure; passing the designable set adds the
+            same measures restricted to it.
 
     Returns:
-        dict with `seq_recovery`, `blosum62` and `blosum62_normalized`.
+        dict with `seq_recovery`, `blosum62` and `blosum62_normalized` over all
+        positions, plus `seq_recovery_designed` and `blosum62_designed` **only
+        when positions are actually held** -- with nothing fixed the restricted
+        values equal the whole-sequence ones, and a duplicate column invites
+        reading one number as two pieces of evidence.
+
+    Why this matters, from `afdesign/README.md` in the earlier tau work: an
+    AfDesign run holding `332-342,356-367` (23 of 73 residues) recovered
+    0.06-0.10 of the 50 designed positions, while the whole-sequence figure read
+    0.36-0.38. The difference is entirely the held residues matching themselves.
+    Those two must not be compared with each other or quoted interchangeably.
     """
     raw = blosum62(sequence, reference)
     self_score = blosum62(reference, reference)
-    return {
+    result = {
         "seq_recovery": seq_recovery(sequence, reference),
         "blosum62": raw,
         # The reference's self-score is the ceiling, so this reads as "how much
         # of the reference's own BLOSUM62 mass does the candidate retain".
         "blosum62_normalized": raw / self_score if self_score else float("nan"),
     }
+
+    if designable is not None and len(designable) < len(reference):
+        designed_sequence = "".join(sequence[i] for i in designable)
+        designed_reference = "".join(reference[i] for i in designable)
+        result["seq_recovery_designed"] = seq_recovery(
+            designed_sequence, designed_reference
+        )
+        result["blosum62_designed"] = blosum62(
+            designed_sequence, designed_reference
+        )
+    return result

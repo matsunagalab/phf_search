@@ -581,6 +581,7 @@ def main():
         ddg_lookup=ddg_lookup,
         mpnn_scorer=mpnn_scorer,
         reference_sequence=native_sequence,
+        designable=designable,
         amyloid_agg=args.amyloid_agg,
         aggrescan_metric=args.aggrescan_metric,
     )
