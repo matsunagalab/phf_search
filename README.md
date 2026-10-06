@@ -600,6 +600,32 @@ only explores the rest. The syntax follows ColabDesign's
 (`colabdesign.shared.prep.prep_pos`): comma-separated segments, ranges with a
 hyphen, and **PDB residue numbers**.
 
+**Specify only the residue numbers; you do not need to supply the amino-acid
+sequence to preserve.** Prepare the target with `prepare_reference.py` first:
+it writes the WT sequence to `data/<target>_sequence.txt` and the reference PDB
+used to map residue numbers to sequence positions. For PHF chains A,C,E,G,I,
+the sequence file is `data/5o3l_acegi_sequence.txt`. Without `--initial-seq`,
+the search starts from this sequence and leaves the fixed positions unchanged.
+Without `--fix-pos`, all positions are free to change.
+
+For example, to use the fixed regions from the earlier tau calculation:
+
+```bash
+uv run python run_search.py \
+  --pdb-id 5O3L --chains A,C,E,G,I \
+  --fix-pos 332-342,356-367 \
+  --n-steps 100
+```
+
+This preserves residues 332-342 (`PGGGQVEVKSE`, 11 residues) and 356-367
+(`SLDNITHVPGGG`, 12 residues) at their WT identities in every chain: **23
+positions are fixed and the remaining 50 are designable**. VQIVYK (306-311)
+remains designable in this example. `--initial-seq` is an optional starting
+sequence, not a separate specification of what to preserve; if supplied, it
+must match the prepared WT sequence at every fixed position.
+
+Other examples:
+
 ```bash
 # Keep the VQIVYK motif and design around it
 uv run python run_search.py --n-steps 100 --fix-pos 306-311
